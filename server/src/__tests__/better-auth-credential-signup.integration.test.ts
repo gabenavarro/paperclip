@@ -16,7 +16,7 @@
 import express from "express";
 import request from "supertest";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { authAccounts, createDb } from "@paperclipai/db";
+import { authAccounts, authUsers, createDb } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -119,5 +119,60 @@ describeEmbeddedPostgres("Better Auth credential sign-up against the real schema
     expect(signIn.status).toBe(200);
     expect(signIn.body?.user?.email).toBe(EMAIL);
     expect(sessionCookies(signIn).length).toBeGreaterThan(0);
+  });
+});
+
+describeEmbeddedPostgres("Better Auth account allowlist against the real schema", () => {
+  let database: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+  let db!: ReturnType<typeof createDb>;
+  let app!: express.Express;
+  const originalEnv = {
+    secret: process.env.BETTER_AUTH_SECRET,
+    rateLimit: process.env.PAPERCLIP_AUTH_RATE_LIMIT_ENABLED,
+    allowedDomains: process.env.PAPERCLIP_AUTH_ALLOWED_EMAIL_DOMAINS,
+  };
+
+  beforeAll(async () => {
+    process.env.BETTER_AUTH_SECRET = "better-auth-secret-for-allowlist-tests";
+    process.env.PAPERCLIP_AUTH_RATE_LIMIT_ENABLED = "false";
+    process.env.PAPERCLIP_AUTH_ALLOWED_EMAIL_DOMAINS = "example.com";
+
+    database = await startEmbeddedPostgresTestDatabase("paperclip-better-auth-allowlist-");
+    db = createDb(database.connectionString);
+
+    const auth = createBetterAuthInstance(db, testConfig(), [ORIGIN]);
+    app = express();
+    app.all("/api/auth/{*authPath}", createBetterAuthHandler(auth));
+  }, 30_000);
+
+  afterAll(async () => {
+    await database?.cleanup();
+    for (const [key, value] of [
+      ["BETTER_AUTH_SECRET", originalEnv.secret],
+      ["PAPERCLIP_AUTH_RATE_LIMIT_ENABLED", originalEnv.rateLimit],
+      ["PAPERCLIP_AUTH_ALLOWED_EMAIL_DOMAINS", originalEnv.allowedDomains],
+    ] as const) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  it("creates accounts only for allowlisted email domains", async () => {
+    const blocked = await request(app)
+      .post("/api/auth/sign-up/email")
+      .set("origin", ORIGIN)
+      .send({ email: "intruder@elsewhere.test", password: PASSWORD, name: "Intruder" });
+
+    expect(blocked.status).toBeGreaterThanOrEqual(400);
+    expect(blocked.status).toBeLessThan(500);
+    expect(await db.select().from(authUsers)).toHaveLength(0);
+
+    const allowed = await request(app)
+      .post("/api/auth/sign-up/email")
+      .set("origin", ORIGIN)
+      .send({ email: EMAIL, password: PASSWORD, name: "Founder" });
+
+    expect(allowed.status).toBe(200);
+    expect(await db.select().from(authUsers)).toHaveLength(1);
   });
 });

@@ -3,6 +3,7 @@ import type { BetterAuthOptions } from "better-auth";
 import { getCookies } from "better-auth/cookies";
 import {
   buildBetterAuthAdvancedOptions,
+  buildBetterAuthGoogleOptions,
   buildBetterAuthRateLimitOptions,
   deriveAuthCookiePrefix,
   deriveAuthTrustedOrigins,
@@ -240,5 +241,56 @@ describe("Better Auth cookie scoping", () => {
     ]));
     expect(trustedOrigins).not.toContain("https://board.example.test:3100");
     expect(trustedOrigins).not.toContain("http://board.example.test:3100");
+  });
+});
+
+describe("Better Auth Google sign-in", () => {
+  const googleEnv = {
+    PAPERCLIP_AUTH_GOOGLE_CLIENT_ID: "client-id.apps.googleusercontent.com",
+    PAPERCLIP_AUTH_GOOGLE_CLIENT_SECRET: "client-secret",
+  };
+
+  function createUserHook(env: NodeJS.ProcessEnv) {
+    const before = buildBetterAuthGoogleOptions(env).databaseHooks?.user?.create?.before;
+    if (!before) throw new Error("expected a user.create.before hook");
+    return (email: string) => before({ email } as never, undefined);
+  }
+
+  it("adds nothing when Google sign-in and allowlists are not configured", () => {
+    expect(buildBetterAuthGoogleOptions({})).toEqual({});
+  });
+
+  it("enables the Google provider only when both the client id and secret are set", () => {
+    expect(
+      buildBetterAuthGoogleOptions({ PAPERCLIP_AUTH_GOOGLE_CLIENT_ID: "client-id" }).socialProviders,
+    ).toBeUndefined();
+    expect(buildBetterAuthGoogleOptions(googleEnv).socialProviders).toEqual({
+      google: {
+        clientId: "client-id.apps.googleusercontent.com",
+        clientSecret: "client-secret",
+        prompt: "select_account",
+      },
+    });
+  });
+
+  it("creates accounts only for allowlisted email domains", async () => {
+    const allow = createUserHook({
+      ...googleEnv,
+      PAPERCLIP_AUTH_ALLOWED_EMAIL_DOMAINS: " Triplebar.com, example.org ",
+    });
+
+    await expect(allow("Ada@TripleBar.com")).resolves.toBeUndefined();
+    await expect(allow("grace@example.org")).resolves.toBeUndefined();
+    await expect(allow("eve@gmail.com")).resolves.toBe(false);
+    await expect(allow("eve@evil-triplebar.com")).resolves.toBe(false);
+    await expect(allow("eve@triplebar.com.evil.io")).resolves.toBe(false);
+    await expect(allow("")).resolves.toBe(false);
+  });
+
+  it("creates accounts for exact allowlisted emails", async () => {
+    const allow = createUserHook({ PAPERCLIP_AUTH_ALLOWED_EMAILS: "Owner@gmail.com" });
+
+    await expect(allow("owner@GMAIL.com")).resolves.toBeUndefined();
+    await expect(allow("someone@gmail.com")).resolves.toBe(false);
   });
 });

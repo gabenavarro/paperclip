@@ -12,6 +12,7 @@ import { fetchCompanyListForCurrentAccount, useCompanyListQuery } from "../api/c
 import { healthApi } from "../api/health";
 import { getAdapterLabel } from "../adapters/adapter-display-registry";
 import { clearPendingInviteToken, rememberPendingInviteToken } from "../lib/invite-memory";
+import { GoogleSignInButton } from "../components/GoogleSignInButton";
 import { queryKeys } from "../lib/queryKeys";
 import { formatDate } from "../lib/utils";
 
@@ -230,6 +231,11 @@ export function InviteLandingPage() {
     queryFn: () => healthApi.get(),
     retry: false,
   });
+  const googleSignInEnabled = healthQuery.data?.auth?.google === true;
+  const signUpDisabled = healthQuery.data?.auth?.signUpDisabled === true;
+  useEffect(() => {
+    if (signUpDisabled) setAuthMode("sign_in");
+  }, [signUpDisabled]);
   const sessionQuery = useQuery({
     queryKey: queryKeys.auth.session,
     queryFn: () => authApi.getSession(),
@@ -672,11 +678,21 @@ export function InviteLandingPage() {
                   <p className="mt-1 text-sm text-zinc-400">
                     {authMode === "sign_up"
                       ? `Start with a Paperclip account. After that, you'll come right back here to accept the invite for ${companyDisplayName}.`
-                      : "Use the Paperclip account that already matches this invite. If you do not have one yet, switch back to create account."}
+                      : signUpDisabled
+                        ? "Use the Paperclip account that already matches this invite."
+                        : "Use the Paperclip account that already matches this invite. If you do not have one yet, switch back to create account."}
                   </p>
                 </div>
 
-                <div className="flex gap-2">
+                {googleSignInEnabled && (
+                  <GoogleSignInButton
+                    callbackURL={`/invite/${token}`}
+                    errorCallbackURL={`/auth?next=${encodeURIComponent(`/invite/${token}`)}`}
+                    onBeforeRedirect={() => rememberPendingInviteToken(token)}
+                  />
+                )}
+
+                {!signUpDisabled && <div className="flex gap-2">
                   <button
                     type="button"
                     className={`${modeButtonBaseClassName} ${
@@ -705,7 +721,7 @@ export function InviteLandingPage() {
                   >
                     I already have an account
                   </button>
-                </div>
+                </div>}
 
                 <form
                   className="space-y-4"
@@ -807,11 +823,11 @@ export function InviteLandingPage() {
                   </Button>
                 </form>
 
-                <p className="text-xs leading-5 text-zinc-500">
+                {!signUpDisabled && <p className="text-xs leading-5 text-zinc-500">
                   {authMode === "sign_up"
                     ? "Already signed up before? Use the existing-account option instead so the invite lands on the right Paperclip user."
                     : "No account yet? Switch back to create account so you can accept the invite with a new login."}
-                </p>
+                </p>}
               </div>
             ) : (
               <div className="space-y-4">

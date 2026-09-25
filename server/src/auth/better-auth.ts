@@ -86,6 +86,51 @@ export function buildBetterAuthRateLimitOptions(input: {
   };
 }
 
+function readLowercaseList(value: string | undefined): string[] {
+  return (value ?? "")
+    .split(",")
+    .map((entry) => entry.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+/**
+ * Optional "Sign in with Google" plus an account-creation allowlist. The
+ * allowlist runs in `user.create.before`, the one point every sign-up path
+ * (email and every social provider) goes through; returning `false` makes
+ * Better Auth refuse the account, and OAuth callbacks then redirect with
+ * `error=unable_to_create_user`. Accounts that already exist still sign in.
+ */
+export function buildBetterAuthGoogleOptions(env: NodeJS.ProcessEnv = process.env) {
+  const clientId = env.PAPERCLIP_AUTH_GOOGLE_CLIENT_ID?.trim();
+  const clientSecret = env.PAPERCLIP_AUTH_GOOGLE_CLIENT_SECRET?.trim();
+  const allowedDomains = readLowercaseList(env.PAPERCLIP_AUTH_ALLOWED_EMAIL_DOMAINS);
+  const allowedEmails = readLowercaseList(env.PAPERCLIP_AUTH_ALLOWED_EMAILS);
+
+  return {
+    ...(clientId && clientSecret
+      ? { socialProviders: { google: { clientId, clientSecret, prompt: "select_account" as const } } }
+      : {}),
+    ...(allowedDomains.length > 0 || allowedEmails.length > 0
+      ? {
+          databaseHooks: {
+            user: {
+              create: {
+                before: async (user: { email?: string | null }) => {
+                  const email = user.email?.trim().toLowerCase() ?? "";
+                  const domain = email.slice(email.lastIndexOf("@") + 1);
+                  if (email.includes("@") && (allowedEmails.includes(email) || allowedDomains.includes(domain))) {
+                    return;
+                  }
+                  return false;
+                },
+              },
+            },
+          },
+        }
+      : {}),
+  };
+}
+
 export function shouldDisableSecureAuthCookies(input: {
   deploymentMode: Config["deploymentMode"];
   deploymentExposure?: Config["deploymentExposure"];
@@ -275,6 +320,7 @@ export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins:
       requireEmailVerification: false,
       disableSignUp: config.authDisableSignUp,
     },
+    ...buildBetterAuthGoogleOptions(),
     rateLimit: buildBetterAuthRateLimitOptions({
       deploymentMode: config.deploymentMode,
       deploymentExposure: config.deploymentExposure,

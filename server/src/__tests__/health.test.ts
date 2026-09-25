@@ -409,6 +409,44 @@ describe("GET /health", () => {
     expect(res.body.serverInfo).toBeUndefined();
   });
 
+  it.each([
+    ["anonymous", { type: "none", source: "none" }],
+    ["board", { type: "board", userId: "user-1", source: "session" }],
+  ])("tells %s callers which sign-in methods authenticated mode offers", async (_label, actor) => {
+    const devServerStatus = await import("../dev-server-status.js");
+    vi.spyOn(devServerStatus, "readPersistedDevServerStatus").mockReturnValue(undefined);
+    const { healthRoutes } = await import("../routes/health.js");
+    const db = {
+      execute: vi.fn().mockResolvedValue([{ "?column?": 1 }]),
+      select: vi.fn(() => ({
+        from: vi.fn(() => ({
+          where: vi.fn().mockResolvedValue([{ count: 1 }]),
+        })),
+      })),
+    } as unknown as Db;
+    const app = express();
+    app.use((req, _res, next) => {
+      (req as any).actor = actor;
+      next();
+    });
+    app.use(
+      "/health",
+      healthRoutes(db, {
+        deploymentMode: "authenticated",
+        deploymentExposure: "public",
+        authReady: true,
+        companyDeletionEnabled: false,
+        serverInfo: testServerInfo,
+        auth: { google: true, signUpDisabled: true },
+      }),
+    );
+
+    const res = await request(app).get("/health");
+
+    expect(res.status).toBe(200);
+    expect(res.body.auth).toEqual({ google: true, signUpDisabled: true });
+  });
+
   it("redacts detailed metadata when authenticated mode is reached without auth middleware", async () => {
     const devServerStatus = await import("../dev-server-status.js");
     vi.spyOn(devServerStatus, "readPersistedDevServerStatus").mockReturnValue(undefined);
