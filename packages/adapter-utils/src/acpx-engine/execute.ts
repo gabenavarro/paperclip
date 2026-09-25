@@ -1998,6 +1998,11 @@ async function buildRuntime(input: {
   if (requestedModel && acpxAgent === "claude" && !env.ANTHROPIC_MODEL) {
     env.ANTHROPIC_MODEL = requestedModel;
   }
+  // Same for gemini: Gemini CLI's ACP server rejects session/set_config_option
+  // (ACP -32601 as of 0.61) and reads GEMINI_MODEL at startup in every mode.
+  if (requestedModel && acpxAgent === "gemini" && !env.GEMINI_MODEL) {
+    env.GEMINI_MODEL = requestedModel;
+  }
   if (acpxAgent === "codex") {
     const codexStartupConfig = buildCodexStartupConfig({
       existingConfig: env.CODEX_CONFIG,
@@ -2561,13 +2566,14 @@ async function buildRuntime(input: {
 
 function sessionConfigOptions(prepared: AcpxPreparedRuntime): Array<{ key: string; value: string }> {
   const options: Array<{ key: string; value: string }> = [];
-  // Claude and Codex runtime config is pre-set via startup env vars; skip
+  // Claude, Codex and Gemini models are pre-set via startup env vars; skip
   // set_config_option to avoid ACP-server picker validation rejecting valid
   // backend model IDs that are not advertised by the local ACP server.
   if (
     prepared.requestedModel &&
     prepared.acpxAgent !== "claude" &&
-    prepared.acpxAgent !== "codex"
+    prepared.acpxAgent !== "codex" &&
+    prepared.acpxAgent !== "gemini"
   ) {
     options.push({ key: "model", value: prepared.requestedModel });
   }
