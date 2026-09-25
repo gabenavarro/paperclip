@@ -622,6 +622,8 @@ const ACPX_INHERITED_PROVIDER_ENV_KEYS: Readonly<Record<string, ReadonlySet<stri
     "GOOGLE_GENAI_USE_VERTEXAI",
     "GOOGLE_CLOUD_PROJECT",
     "GOOGLE_CLOUD_LOCATION",
+    // Server-wide default model for agents on "auto"; a run's own model wins.
+    "GEMINI_MODEL",
   ]),
   kimi: new Set([
     "KIMI_API_KEY",

@@ -124,6 +124,7 @@ describe("acpx identity split and launch environment", () => {
       GOOGLE_GENAI_USE_VERTEXAI: "true",
       GOOGLE_CLOUD_PROJECT: "vertex-project",
       GOOGLE_CLOUD_LOCATION: "global",
+      GEMINI_MODEL: "gemini-3.8-flash",
       KIMI_MODEL_NAME: "kimi-code/test",
       KIMI_MODEL_API_KEY: "kimi-host-secret",
       KIMI_MODEL_BASE_URL: "https://kimi.example",
@@ -170,6 +171,7 @@ describe("acpx identity split and launch environment", () => {
       GOOGLE_GENAI_USE_VERTEXAI: "true",
       GOOGLE_CLOUD_PROJECT: "vertex-project",
       GOOGLE_CLOUD_LOCATION: "global",
+      GEMINI_MODEL: "gemini-3.8-flash",
     });
     expect(projectAcpxInheritedHostEnvironment(inherited, "kimi", true)).toEqual({
       PATH: "/usr/bin",

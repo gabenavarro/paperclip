@@ -20,8 +20,11 @@ On Google Cloud (for example Cloud Run with a service account that has `roles/ai
 | `GOOGLE_CLOUD_PROJECT` | The Google Cloud project that is billed for Vertex AI |
 | `GOOGLE_CLOUD_LOCATION` | A Vertex AI location, for example `global` |
 | `ACPX_AUTH_VERTEX_AI` | `1`. The ACP engine (the default) authenticates only when acpx selects an ACP auth method; this selects `vertex-ai`. The CLI engine does not need it. |
+| `GEMINI_MODEL` | Optional default model for agents whose model is `auto`, for example `gemini-3.8-flash`. An agent's own model setting wins. |
 
-The identity comes from Application Default Credentials: the attached service account on Google Cloud, or `GOOGLE_APPLICATION_CREDENTIALS` / `gcloud auth application-default login` elsewhere. Do not also set `GEMINI_API_KEY` or `GOOGLE_API_KEY` on the server; Gemini CLI can prefer a key over Vertex AI. Use model IDs from Vertex AI, for example `gemini-3.5-flash`.
+The identity comes from Application Default Credentials: the attached service account on Google Cloud, or `GOOGLE_APPLICATION_CREDENTIALS` / `gcloud auth application-default login` elsewhere. Do not also set `GEMINI_API_KEY` or `GOOGLE_API_KEY` on the server; Gemini CLI can prefer a key over Vertex AI. Use model IDs from Vertex AI, for example `gemini-3.8-flash`. The newest models are served only from the `global` location (`us-central1` returns 404 for them), and new models can briefly return 429 while capacity ramps up; Gemini CLI retries those.
+
+On a fresh headless host (a container), the CLI engine also needs `GEMINI_CLI_TRUST_WORKSPACE=true`: Gemini CLI refuses to run headless in a folder it has not trusted (exit code 55).
 
 ## Configuration Fields
 
