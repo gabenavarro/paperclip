@@ -32,6 +32,11 @@ export type HealthStatus = {
   authReady?: boolean;
   bootstrapStatus?: "ready" | "bootstrap_pending";
   bootstrapInviteActive?: boolean;
+  /** Sign-in methods the login page offers (authenticated mode only). */
+  auth?: {
+    google: boolean;
+    signUpDisabled: boolean;
+  };
   features?: {
     companyDeletionEnabled?: boolean;
   };

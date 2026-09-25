@@ -13,6 +13,7 @@ const acceptInviteMock = vi.hoisted(() => vi.fn());
 const getSessionMock = vi.hoisted(() => vi.fn());
 const signInEmailMock = vi.hoisted(() => vi.fn());
 const signUpEmailMock = vi.hoisted(() => vi.fn());
+const signInSocialMock = vi.hoisted(() => vi.fn());
 const healthGetMock = vi.hoisted(() => vi.fn());
 const listCompaniesMock = vi.hoisted(() => vi.fn());
 const setSelectedCompanyIdMock = vi.hoisted(() => vi.fn());
@@ -29,6 +30,7 @@ vi.mock("../api/auth", () => ({
     getSession: () => getSessionMock(),
     signInEmail: (input: unknown) => signInEmailMock(input),
     signUpEmail: (input: unknown) => signUpEmailMock(input),
+    signInSocial: (input: unknown) => signInSocialMock(input),
   },
 }));
 
@@ -167,6 +169,55 @@ describe("InviteLandingPage", () => {
     expect(adapterSelect).toBeTruthy();
     expect(Array.from(adapterSelect!.options).map((option) => option.value))
       .not.toContain("paperclip_runner");
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("offers Google sign-in on the invite and returns to the invite afterwards", async () => {
+    healthGetMock.mockResolvedValue({
+      status: "ok",
+      deploymentMode: "authenticated",
+      auth: { google: true, signUpDisabled: true },
+    });
+    signInSocialMock.mockResolvedValue(undefined);
+
+    const root = createRoot(container);
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+
+    await act(async () => {
+      root.render(
+        <MemoryRouter initialEntries={["/invite/pcp_invite_test"]}>
+          <QueryClientProvider client={queryClient}>
+            <Routes>
+              <Route path="/invite/:token" element={<InviteLandingPage />} />
+            </Routes>
+          </QueryClientProvider>
+        </MemoryRouter>,
+      );
+    });
+    await flushReact();
+    await flushReact();
+
+    const buttons = () => Array.from(container.querySelectorAll("button"));
+    expect(buttons().some((button) => button.textContent?.trim() === "Create account")).toBe(false);
+    const google = buttons().find((button) => button.textContent?.trim() === "Continue with Google");
+    expect(google).toBeDefined();
+
+    await act(async () => {
+      google?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flushReact();
+
+    expect(localStorage.getItem("paperclip:pending-invite-token")).toBe("pcp_invite_test");
+    expect(signInSocialMock).toHaveBeenCalledWith({
+      provider: "google",
+      callbackURL: "/invite/pcp_invite_test",
+      errorCallbackURL: "/auth?next=%2Finvite%2Fpcp_invite_test",
+    });
 
     await act(async () => {
       root.unmount();

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "@/lib/router";
 import { authApi } from "../api/auth";
+import { healthApi } from "../api/health";
 import { queryKeys } from "../lib/queryKeys";
 import { getRememberedInvitePath } from "../lib/invite-memory";
 import { Button } from "@/components/ui/button";
@@ -9,6 +10,7 @@ import { AsciiArtAnimation } from "@/components/AsciiArtAnimation";
 import { PaperclipLoading } from "@/components/AnimatedPaperclipIcon";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { PaperclipLockup } from "../components/PaperclipLockup";
+import { GoogleSignInButton, describeOAuthError } from "../components/GoogleSignInButton";
 
 type AuthMode = "sign_in" | "sign_up";
 
@@ -20,7 +22,7 @@ export function AuthPage() {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(() => describeOAuthError(searchParams.get("error")));
   const errorId = "auth-error";
 
   const nextPath = useMemo(
@@ -32,6 +34,13 @@ export function AuthPage() {
     queryFn: () => authApi.getSession(),
     retry: false,
   });
+  const { data: health } = useQuery({
+    queryKey: queryKeys.health,
+    queryFn: () => healthApi.get(),
+    retry: false,
+  });
+  const googleEnabled = health?.auth?.google === true;
+  const signUpDisabled = health?.auth?.signUpDisabled === true;
 
   useEffect(() => {
     if (session) {
@@ -97,9 +106,20 @@ export function AuthPage() {
           </h1>
           <p className="mt-1 text-sm text-muted-foreground">
             {mode === "sign_in"
-              ? "Use your email and password to access this instance."
+              ? googleEnabled
+                ? "Continue with Google, or use your email and password."
+                : "Use your email and password to access this instance."
               : "Create an account for this instance. Email confirmation is not required in v1."}
           </p>
+
+          {googleEnabled && (
+            <div className="mt-6">
+              <GoogleSignInButton
+                callbackURL={nextPath}
+                errorCallbackURL={`/auth?next=${encodeURIComponent(nextPath)}`}
+              />
+            </div>
+          )}
 
           <form
             className="mt-6 space-y-4"
@@ -185,7 +205,7 @@ export function AuthPage() {
             </Button>
           </form>
 
-          <div className="mt-5 text-sm text-muted-foreground">
+          {!signUpDisabled && <div className="mt-5 text-sm text-muted-foreground">
             {mode === "sign_in" ? "Need an account?" : "Already have an account?"}{" "}
             <button
               type="button"
@@ -197,7 +217,7 @@ export function AuthPage() {
             >
               {mode === "sign_in" ? "Create one" : "Sign in"}
             </button>
-          </div>
+          </div>}
         </div>
       </div>
 

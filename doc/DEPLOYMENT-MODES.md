@@ -64,6 +64,26 @@ Paperclip now treats **bind** as a separate concern from auth:
 - recommended bind is `loopback` behind a reverse proxy; direct `lan/custom` is advanced
 - local stdio MCP runtime slots fail closed by default; set `PAPERCLIP_TRUSTED_MCP_RUNTIME_HOST` only when a trusted worker/runtime host is configured to supervise those processes. Remote HTTP MCP remains the preferred public-hosted path.
 
+### Sign in with Google (optional)
+
+Both `authenticated` exposures can offer "Continue with Google" next to email
+and password:
+
+- Set `PAPERCLIP_AUTH_GOOGLE_CLIENT_ID` and `PAPERCLIP_AUTH_GOOGLE_CLIENT_SECRET`
+  from a Google OAuth client of type **Web application** (Google Auth Platform
+  → Clients). On that client, register the JavaScript origin `<public URL>`
+  and the redirect URI `<public URL>/api/auth/callback/google`.
+- Limit who can create an account with `PAPERCLIP_AUTH_ALLOWED_EMAIL_DOMAINS`
+  (comma-separated domains, exact match) and/or `PAPERCLIP_AUTH_ALLOWED_EMAILS`
+  (comma-separated addresses). The check runs when an account is created, for
+  every sign-up path. Existing accounts keep signing in.
+- Set `PAPERCLIP_AUTH_DISABLE_SIGN_UP=true` together with Google sign-in. Email
+  sign-up does not verify addresses, so a domain allowlist cannot prove who
+  owns an email-and-password account. Google sign-up stays available.
+- The login and invite pages read the enabled methods from `/api/health`
+  (`auth.google`, `auth.signUpDisabled`). A Google account that the allowlist
+  rejects comes back to `/auth` with a clear message.
+
 ### Paperclip Cloud warm-pool identity
 
 A Cloud-managed warm-pool process initially boots under a `pool-*` origin. It

@@ -11,12 +11,21 @@ import { AuthPage } from "./Auth";
 const getSessionMock = vi.hoisted(() => vi.fn());
 const signInEmailMock = vi.hoisted(() => vi.fn());
 const signUpEmailMock = vi.hoisted(() => vi.fn());
+const signInSocialMock = vi.hoisted(() => vi.fn());
+const healthGetMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../api/auth", () => ({
   authApi: {
     getSession: () => getSessionMock(),
     signInEmail: (input: unknown) => signInEmailMock(input),
     signUpEmail: (input: unknown) => signUpEmailMock(input),
+    signInSocial: (input: unknown) => signInSocialMock(input),
+  },
+}));
+
+vi.mock("../api/health", () => ({
+  healthApi: {
+    get: () => healthGetMock(),
   },
 }));
 
@@ -88,6 +97,8 @@ describe("AuthPage", () => {
     getSessionMock.mockResolvedValue(null);
     signInEmailMock.mockResolvedValue(undefined);
     signUpEmailMock.mockResolvedValue(undefined);
+    signInSocialMock.mockResolvedValue(undefined);
+    healthGetMock.mockResolvedValue({ status: "ok", deploymentMode: "authenticated" });
   });
 
   afterEach(() => {
@@ -96,11 +107,11 @@ describe("AuthPage", () => {
     vi.clearAllMocks();
   });
 
-  async function mount() {
+  async function mount(initialEntry = "/auth") {
     const { root, queryClient } = renderAuthPage(container);
     await act(async () => {
       root.render(
-        <MemoryRouter initialEntries={["/auth"]}>
+        <MemoryRouter initialEntries={[initialEntry]}>
           <QueryClientProvider client={queryClient}>
             <Routes>
               <Route path="/auth" element={<AuthPage />} />
@@ -236,6 +247,7 @@ describe("AuthPage", () => {
       passwordInput.dispatchEvent(new Event("input", { bubbles: true }));
     });
 
+    const healthFetchesBeforeSignIn = healthGetMock.mock.calls.length;
     const form = container.querySelector("form") as HTMLFormElement;
     await act(async () => {
       form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
@@ -247,7 +259,83 @@ describe("AuthPage", () => {
       email: "jane@example.com",
       password: "supersecret",
     });
-    expect(queryClient.getQueryState(queryKeys.health)?.isInvalidated).toBe(true);
+    // The page observes health (sign-in methods), so invalidation refetches
+    // right away instead of leaving the anonymous payload marked stale.
+    expect(healthGetMock.mock.calls.length).toBeGreaterThan(healthFetchesBeforeSignIn);
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+  function findButton(label: string) {
+    return Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.trim() === label,
+    );
+  }
+
+  it("offers Continue with Google when the server enables it", async () => {
+    healthGetMock.mockResolvedValue({
+      status: "ok",
+      deploymentMode: "authenticated",
+      auth: { google: true, signUpDisabled: false },
+    });
+    const { root } = await mount();
+
+    const google = findButton("Continue with Google");
+    expect(google).toBeDefined();
+    await act(async () => {
+      google?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flushReact();
+
+    expect(signInSocialMock).toHaveBeenCalledWith({
+      provider: "google",
+      callbackURL: "/",
+      errorCallbackURL: "/auth?next=%2F",
+    });
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("does not offer Google when the server has it off", async () => {
+    const { root } = await mount();
+
+    expect(findButton("Continue with Google")).toBeUndefined();
+    expect(findButton("Create one")).toBeDefined();
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("hides account creation when sign-up is disabled", async () => {
+    healthGetMock.mockResolvedValue({
+      status: "ok",
+      deploymentMode: "authenticated",
+      auth: { google: true, signUpDisabled: true },
+    });
+    const { root } = await mount();
+
+    expect(findButton("Create one")).toBeUndefined();
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("explains a Google account the instance does not allow", async () => {
+    healthGetMock.mockResolvedValue({
+      status: "ok",
+      deploymentMode: "authenticated",
+      auth: { google: true, signUpDisabled: true },
+    });
+    const { root } = await mount("/auth?error=unable_to_create_user");
+
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+      "This Google account is not allowed on this instance.",
+    );
 
     await act(async () => {
       root.unmount();

@@ -177,6 +177,16 @@ export const authApi = {
     await authPost("/sign-up/email", input);
   },
 
+  /** Starts an OAuth sign-in. The server answers with the provider URL, and the browser leaves the page. */
+  signInSocial: async (input: { provider: "google"; callbackURL: string; errorCallbackURL: string }) => {
+    const payload = await authPost("/sign-in/social", input);
+    const url = payload && typeof payload === "object" ? (payload as { url?: unknown }).url : undefined;
+    if (typeof url !== "string" || url.length === 0) {
+      throw new Error("Sign-in did not return a redirect URL");
+    }
+    window.location.assign(url);
+  },
+
   getProfile: async (): Promise<CurrentUserProfile> => {
     const res = await fetch("/api/auth/profile", {
       credentials: "include",

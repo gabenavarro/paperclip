@@ -79,3 +79,4 @@ tests/storybook-visual/playwright-report/
 .vercel/
 .env.local
 test-results/
+/secrets/

@@ -686,6 +686,7 @@ async function startServerWithDatabaseTeardown(
   }
   
   let authReady = config.deploymentMode === "local_trusted";
+  let authSignInMethods: { google: boolean; signUpDisabled: boolean } | undefined;
   let betterAuthHandler: RequestHandler | undefined;
   let resolveSession:
     | ((req: ExpressRequest) => Promise<BetterAuthSessionResult | null>)
@@ -711,6 +712,7 @@ async function startServerWithDatabaseTeardown(
   }
   if (config.deploymentMode === "authenticated") {
     const {
+      buildBetterAuthGoogleOptions,
       createBetterAuthHandler,
       createBetterAuthInstance,
       deriveAuthTrustedOrigins,
@@ -740,6 +742,10 @@ async function startServerWithDatabaseTeardown(
     resolveSession = (req) => resolveBetterAuthSession(auth, req);
     resolveSessionFromHeaders = (headers) => resolveBetterAuthSessionFromHeaders(auth, headers);
     await initializeBoardClaimChallenge(db as any, { deploymentMode: config.deploymentMode });
+    authSignInMethods = {
+      google: Boolean(buildBetterAuthGoogleOptions().socialProviders),
+      signUpDisabled: config.authDisableSignUp,
+    };
     authReady = true;
   }
 
@@ -911,6 +917,7 @@ async function startServerWithDatabaseTeardown(
     authPublicBaseUrl: config.authPublicBaseUrl,
     chatWebhookPublicBaseUrl: config.chatWebhookPublicBaseUrl,
     authReady,
+    authSignInMethods,
     companyDeletionEnabled: config.companyDeletionEnabled,
     announcements: { enabled: config.announcementsEnabled, feedUrl: config.announcementsFeedUrl },
     pluginMigrationDb: pluginMigrationDb as any,

@@ -616,6 +616,14 @@ const ACPX_INHERITED_PROVIDER_ENV_KEYS: Readonly<Record<string, ReadonlySet<stri
     "GOOGLE_API_KEY",
     "GOOGLE_APPLICATION_CREDENTIALS",
     "GOOGLE_GENAI_USE_GCA",
+    // Vertex AI with Application Default Credentials: acpx selects the
+    // `vertex-ai` ACP auth method from the server's ACPX_AUTH_VERTEX_AI, and
+    // Gemini CLI then needs the project and location in its own environment.
+    "GOOGLE_GENAI_USE_VERTEXAI",
+    "GOOGLE_CLOUD_PROJECT",
+    "GOOGLE_CLOUD_LOCATION",
+    // Server-wide default model for agents on "auto"; a run's own model wins.
+    "GEMINI_MODEL",
   ]),
   kimi: new Set([
     "KIMI_API_KEY",
@@ -1992,6 +2000,11 @@ async function buildRuntime(input: {
   if (requestedModel && acpxAgent === "claude" && !env.ANTHROPIC_MODEL) {
     env.ANTHROPIC_MODEL = requestedModel;
   }
+  // Same for gemini: Gemini CLI's ACP server rejects session/set_config_option
+  // (ACP -32601 as of 0.61) and reads GEMINI_MODEL at startup in every mode.
+  if (requestedModel && acpxAgent === "gemini" && !env.GEMINI_MODEL) {
+    env.GEMINI_MODEL = requestedModel;
+  }
   if (acpxAgent === "codex") {
     const codexStartupConfig = buildCodexStartupConfig({
       existingConfig: env.CODEX_CONFIG,
@@ -2555,13 +2568,14 @@ async function buildRuntime(input: {
 
 function sessionConfigOptions(prepared: AcpxPreparedRuntime): Array<{ key: string; value: string }> {
   const options: Array<{ key: string; value: string }> = [];
-  // Claude and Codex runtime config is pre-set via startup env vars; skip
+  // Claude, Codex and Gemini models are pre-set via startup env vars; skip
   // set_config_option to avoid ACP-server picker validation rejecting valid
   // backend model IDs that are not advertised by the local ACP server.
   if (
     prepared.requestedModel &&
     prepared.acpxAgent !== "claude" &&
-    prepared.acpxAgent !== "codex"
+    prepared.acpxAgent !== "codex" &&
+    prepared.acpxAgent !== "gemini"
   ) {
     options.push({ key: "model", value: prepared.requestedModel });
   }

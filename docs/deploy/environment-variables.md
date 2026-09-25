@@ -18,6 +18,10 @@ All environment variables that Paperclip uses for server configuration.
 | `PAPERCLIP_INSTANCE_ID` | `default` | Instance identifier (for multiple local instances) |
 | `PAPERCLIP_DEPLOYMENT_MODE` | `local_trusted` | Runtime mode override |
 | `PAPERCLIP_DEPLOYMENT_EXPOSURE` | `private` | Exposure policy when deployment mode is `authenticated` |
+| `PAPERCLIP_AUTH_GOOGLE_CLIENT_ID` | (unset) | Google OAuth **Web application** client ID. With the secret below, the login and invite pages offer "Continue with Google". Register `<public URL>/api/auth/callback/google` as the client's redirect URI. |
+| `PAPERCLIP_AUTH_GOOGLE_CLIENT_SECRET` | (unset) | Secret for `PAPERCLIP_AUTH_GOOGLE_CLIENT_ID`. Keep it in your secret manager. |
+| `PAPERCLIP_AUTH_ALLOWED_EMAIL_DOMAINS` | (unset) | Comma-separated email domains (exact match) that may create an account, for every sign-up path. Existing accounts are not affected. |
+| `PAPERCLIP_AUTH_ALLOWED_EMAILS` | (unset) | Comma-separated email addresses that may create an account. Combines with the domain list; use it when owners sign in with personal Gmail accounts. |
 | `PAPERCLIP_API_URL` | (auto-derived) | Paperclip API base URL. When set externally (e.g., via Kubernetes ConfigMap, load balancer, or reverse proxy), the server preserves the value instead of deriving it from the listen host and port. Useful for deployments where the public-facing URL differs from the local bind address. |
 | `PAPERCLIP_CHAT_WEBHOOK_PUBLIC_URL` | (board public origin) | Optional HTTPS origin for native chat provider webhooks when ingress and the board use different hosts. Must have no credentials, path, query, or fragment; invalid configuration refuses startup. Used only for provider callback URLs, not board links, authentication, trusted hosts, or identity confirmation. |
 | `PAPERCLIP_RUNNER_PUBLIC_URL` | (unset) | Explicit `wss://` base URL used only when a remote `paperclip_runner` target dials Paperclip directly. Paperclip appends `/api/runner/v1/connect/<runId>`; the reverse proxy must forward WebSocket upgrades for that route. This value is never inferred from request headers. Daytona ignores it and uses provider ingress. |
@@ -186,3 +190,5 @@ These are set automatically by the server when invoking agents:
 |----------|-------------|
 | `ANTHROPIC_API_KEY` | Anthropic API key (for Claude Code adapter) |
 | `OPENAI_API_KEY` | OpenAI API key (for Codex adapter) |
+| `GOOGLE_GENAI_USE_VERTEXAI` | `true` runs the Gemini adapter on Vertex AI with Application Default Credentials. Needs `GOOGLE_CLOUD_PROJECT` and `GOOGLE_CLOUD_LOCATION`. See [Gemini CLI](../adapters/gemini-local.md#vertex-ai-application-default-credentials). |
+| `ACPX_AUTH_VERTEX_AI` | `1` makes the Gemini ACP engine authenticate with Vertex AI |

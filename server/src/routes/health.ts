@@ -127,6 +127,11 @@ export function healthRoutes(
     serverInfo?: ServerInfoSnapshot;
     databaseBackupHealth?: InspectDatabaseBackupHealthOptions;
     runtimeEnv?: CloudInstanceEnv;
+    /**
+     * Sign-in methods the login page offers. Public on purpose: the login page
+     * is anonymous. Omitted when unset, so other responses stay byte-identical.
+     */
+    auth?: { google: boolean; signUpDisabled: boolean };
   } = {
     deploymentMode: "local_trusted",
     deploymentExposure: "private",
@@ -396,6 +401,7 @@ export function healthRoutes(
         commit,
         bootstrapStatus,
         bootstrapInviteActive,
+        ...(opts.auth ? { auth: opts.auth } : {}),
         ...(redactedDatabaseBackup ? { databaseBackup: redactedDatabaseBackup } : {}),
         ...(redactedWarnings ? { warnings: redactedWarnings } : {}),
         ...(devServer ? { devServer } : {}),
@@ -420,6 +426,7 @@ export function healthRoutes(
       authReady: opts.authReady,
       bootstrapStatus,
       bootstrapInviteActive,
+      ...(opts.auth ? { auth: opts.auth } : {}),
       features: {
         companyDeletionEnabled: opts.companyDeletionEnabled,
       },
