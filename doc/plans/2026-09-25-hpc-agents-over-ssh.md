@@ -44,26 +44,20 @@ The agent's Paperclip workspace holds only small files: notes, scripts and confi
 
 ## Part 1: harden the `ssh` environment (code)
 
-Findings from a code review of `packages/adapter-utils/src/ssh.ts`, `sandbox-callback-bridge.ts`, `remote-managed-runtime.ts` and `execution-target.ts`:
+A code review of `packages/adapter-utils/src/ssh.ts`, `sandbox-callback-bridge.ts`, `remote-managed-runtime.ts` and `execution-target.ts` found five problems. Each item below is a finding and then its change. Write each test first. `ssh-fixture.test.ts` runs a real `sshd` with VERBOSE logs, so a test can count `Accepted publickey` lines.
 
-- Each operation starts a new `ssh` login. The callback bridge polls every 100 ms, and each poll is a new login. Over a VPN this is about 40–150 logins per minute per run.
-- There is no keepalive, so a VPN drop is found only by TCP keepalive (about 2 hours).
-- The agent env, including API keys, goes in the `ssh` argv (`exec env K='V' …`). The local argv keeps the keys for the whole run. The remote `ps` shows them until the `exec`.
-- The per-run copy at `<remoteWorkspacePath>/.paperclip-runtime/runs/<runId>` is never deleted.
-- A helper timeout of `0` means "no timeout", and a real timeout from `execFile` (`killed`, SIGTERM) is not detected as a timeout.
-
-Changes. Write each test first. `ssh-fixture.test.ts` runs a real `sshd` with VERBOSE logs, so a test can count `Accepted publickey` lines.
-
-1. **Connection reuse.** In `createSshAuthArgs`, add `ControlMaster=auto`, `ControlPath=<0700 dir>/%C`, `ControlPersist=120`, `ServerAliveInterval=15` and `ServerAliveCountMax=4`.
+1. **Connection reuse.**
+   - Finding: each operation starts a new `ssh` login, including the callback bridge's poll every 100 ms. Over a VPN that is about 40–150 logins per minute per run. There is no keepalive, so a VPN drop is found only after about 2 hours.
+   - Change: in `createSshAuthArgs`, add `ControlMaster=auto`, `ControlPath=<0700 dir>/%C`, `ControlPersist=120`, `ServerAliveInterval=15` and `ServerAliveCountMax=4`.
    - Test: several commands produce one login.
    - Risk: a backgrounded master can hold the caller's stderr pipe open, so `execFile` waits until `ControlPersist` ends. Test this first. The fallback is to start the master explicitly (`ssh -MNf`) and use `ControlMaster=no` for each call.
-2. **Slower bridge polling.** Poll every 1000 ms for `ssh` targets.
+2. **Slower bridge polling.** Poll every 1000 ms for `ssh` targets, not every 100 ms.
 3. **Env off argv.**
-   - Send `export K=V` lines over stdin into a `0600` temp file, then source it, delete it and `exec` the command. stdin is already supported by the helper.
+   - Finding: the agent env, including API keys, goes in the `ssh` argv (`exec env K='V' …`). The local argv keeps the keys for the whole run, and the remote `ps` shows them until the `exec`.
+   - Change: send `export K=V` lines over stdin into a `0600` temp file, then source it, delete it and `exec` the command. The helper already supports stdin. This covers the runner script, the helper command and the agent command in `ssh.ts`.
    - Test: no secret value appears in the `ssh` argv, and the command still sees the env.
-   - Paths: the runner script, the helper command and the agent command in `ssh.ts`.
-4. **Remote cleanup.** Delete `.paperclip-runtime/runs/<runId>` after a successful restore.
-5. **Timeouts.** A helper timeout of `0` uses the default, and `killed`/SIGTERM counts as a timeout.
+4. **Remote cleanup.** The per-run copy at `<remoteWorkspacePath>/.paperclip-runtime/runs/<runId>` is never deleted. Delete it after a successful restore.
+5. **Timeouts.** A helper timeout of `0` means "no timeout", and a real `execFile` timeout (`killed`, SIGTERM) is not detected. Make `0` use the default, and count `killed`/SIGTERM as a timeout.
 
 Verify with the unit tests above. Also run `server/src/__tests__/environment-live-ssh.test.ts` against a real box with `PAPERCLIP_ENV_LIVE_SSH_*`.
 
@@ -89,24 +83,23 @@ Verify with the unit tests above. Also run `server/src/__tests__/environment-liv
 ## Part 3: set up each HPC box (runbook)
 
 1. **Account.** Create a dedicated `paperclip` user with no sudo and no `docker` group. Gemini CLI and OpenCode delete `~/.gemini/skills` and `~/.claude/skills` in the home directory, so the account must be dedicated.
-2. **GPU.** Install an NVIDIA driver version 570 or later (Blackwell) and the NVIDIA Container Toolkit, then generate CDI.
+2. **GPU.** Install an NVIDIA driver version 570 or later (Blackwell). Apptainer's `--nv` binds the driver libraries itself, so no container toolkit is needed.
 3. **Slurm, single node.**
    - Ubuntu 24.04: `slurm-wlm munge slurm-wlm-nvml-plugin`. Rocky 9: the OpenHPC 3.x repo.
    - `slurm.conf`: `SelectType=select/cons_tres`, `ProctrackType=proctrack/cgroup`, `TaskPlugin=task/cgroup,task/affinity`, `GresTypes=gpu`, and a `NodeName` line with CPUs, `RealMemory` and `Gres`.
    - `gres.conf`: `AutoDetect=nvml`.
    - `cgroup.conf`: `ConstrainCores`, `ConstrainRAMSpace` and `ConstrainDevices`, all set to `yes`.
 4. **Apptainer, and rootless Podman** with subuid/subgid ranges for `paperclip`.
-5. **Nextflow** (Java 17 or later) and the nf-core tools, plus `/etc/paperclip-hpc/nextflow.config`:
+5. **Nextflow** (Java 17 or later), plus `/etc/paperclip-hpc/nextflow.config`. Nextflow fetches nf-core pipelines itself. The config sets:
    - `process.executor = 'slurm'`
    - `apptainer.enabled = true`
-   - a shared `apptainer.cacheDir`
+   - `apptainer.cacheDir = '/data/cache/apptainer'`
    - a `gpu` label that sets `clusterOptions = '--gres=gpu:1'` and `containerOptions = '--nv'`
 6. **Agent runtime.** Node.js 22 or later, git, tar, and the agent CLIs (`claude`, `gemini`) on the login-profile `PATH`.
 7. **Directories.**
    - `/data/jobs`: read-write for `paperclip`.
    - `/data/refs`: read-only in jobs.
-   - `/data/images`: `.sif` files plus `MANIFEST`.
-   - `/data/cache/apptainer`.
+   - `/data/images`: `.sif` files.
 8. **Smoke tests.**
    - `sbatch --gres=gpu:1 --wrap "apptainer exec --nv <image> nvidia-smi -L"`. It must show exactly one GPU.
    - `nextflow run nf-core/demo -r <tag> -profile test,apptainer -c /etc/paperclip-hpc/nextflow.config`.
@@ -115,7 +108,7 @@ Verify with the unit tests above. Also run `server/src/__tests__/environment-liv
 ## Part 4: job conventions (the skills teach these)
 
 - **Job directory.**
-  - Layout: `/data/jobs/<issue>/<job>/` with `code/`, `inputs/` (links), `outputs/`, `logs/`, `work/` and `JOB.md`. `JOB.md` says what, why and how to reproduce.
+  - Layout: `/data/jobs/<issue>/<job>/` with `code/`, `inputs/` (links), `outputs/`, `logs/` and `work/`. The issue comment holds what, why, and the command that reproduces the job.
   - Never keep job data or a Nextflow `work/` directory in the Paperclip workspace. The workspace is copied back to Cloud Run's in-memory disk after each run.
 - **Container job.**
   ```
@@ -134,10 +127,9 @@ Verify with the unit tests above. Also run `server/src/__tests__/environment-liv
   ```
   Run the Nextflow head job as its own `sbatch` job, so it survives the agent's run.
 - **New image.**
-  1. Write the Dockerfile under `/data/images/src/<name>/`.
+  1. Write the Dockerfile under `/data/images/src/<name>/`. Pin the base with `FROM …@sha256:<digest>` and record versions with `LABEL cuda=… torch=…`. `apptainer inspect` shows the labels.
   2. Build and export: `podman build` → `podman save -o <tar>` → `apptainer build /data/images/<name>/<tag>-<sha12>.sif docker-archive:<tar>`.
-  3. Add a line to `MANIFEST`: base-image digest, `.sif` sha256, and the CUDA and PyTorch versions.
-  4. Before a CUDA change, compare `nvidia-smi` with the CUDA version. Blackwell needs CUDA 12.8 or later, CUDA 12.x needs driver 525 or later, and CUDA 13.x needs driver 580 or later.
+  3. Before a CUDA change, compare `nvidia-smi` with the CUDA version. Blackwell needs CUDA 12.8 or later, CUDA 12.x needs driver 525 or later, and CUDA 13.x needs driver 580 or later.
 - **Long work.** Submit the job and write the Slurm job ID on the issue, then end the heartbeat. Later heartbeats check `squeue`, `sacct` or `nextflow log` and report.
 - **Default limits.** 16 CPUs, 64 GB, 1 GPU and 24 h, unless the issue asks for more.
 
@@ -149,7 +141,7 @@ Skills are markdown, versioned in `doc/hpc/skills/<slug>/SKILL.md`. Import them 
 |---|---|
 | `hpc-jobs` | job directories, `sbatch` + Apptainer, GPUs, limits, status across heartbeats |
 | `hpc-nf-core` | nf-core with Nextflow on Slurm + Apptainer, versions, `-resume`, outputs |
-| `hpc-ml-images` | Dockerfile → Podman → `.sif`, CUDA and driver rules, pinning, `MANIFEST` |
+| `hpc-ml-images` | Dockerfile → Podman → `.sif`, CUDA and driver rules, pinning, labels |
 
 | Agent | Skills | Adapter |
 |---|---|---|
@@ -158,11 +150,10 @@ Skills are markdown, versioned in `doc/hpc/skills/<slug>/SKILL.md`. Import them 
 
 ## Security
 
-- The `paperclip` account has no sudo and no `docker` group. Podman runs rootless and Apptainer needs no privileges. Slurm cgroups cap CPU, memory and GPUs, and reference data is read-only.
+Parts 1–3 hold the controls: a dedicated account, no `docker` group, rootless builds, Slurm cgroups, env off argv, a pinned host key, and `sshd` reachable only over the VPN. Two more points:
+
 - On `ssh` targets the agent CLIs skip permission prompts. The account's Unix rights are the boundary.
-- Secrets: env goes off argv (Part 1.3). The SSH key is in Paperclip's vault, the host key is pinned, and the GCP credential file is `0600`.
 - What an agent reads goes to the model through Vertex AI in the company project. Raw data stays on the box.
-- `sshd` is reachable only over the VPN, and only from the Cloud Run subnet.
 
 ## Open questions (defaults in brackets)
 
