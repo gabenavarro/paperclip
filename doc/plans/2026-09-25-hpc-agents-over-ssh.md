@@ -44,7 +44,7 @@ The agent's Paperclip workspace holds only small files: notes, scripts and confi
 
 ## Part 1: harden the `ssh` environment (code)
 
-A code review of `packages/adapter-utils/src/ssh.ts`, `sandbox-callback-bridge.ts`, `remote-managed-runtime.ts` and `execution-target.ts` found five problems. Each item below is a finding and then its change. Write each test first. `ssh-fixture.test.ts` runs a real `sshd` with VERBOSE logs, so a test can count `Accepted publickey` lines.
+A code review of `packages/adapter-utils/src/ssh.ts`, `sandbox-callback-bridge.ts`, `remote-managed-runtime.ts` and `execution-target.ts` found five problems (items 1–5). Each is a finding and then its change. Item 6 adds one route for Part 6. Write each test first. `ssh-fixture.test.ts` runs a real `sshd` with VERBOSE logs, so a test can count `Accepted publickey` lines.
 
 1. **Connection reuse.**
    - Finding: each operation starts a new `ssh` login, including the callback bridge's poll every 100 ms. Over a VPN that is about 40–150 logins per minute per run. There is no keepalive, so a VPN drop is found only after about 2 hours.
@@ -58,6 +58,7 @@ A code review of `packages/adapter-utils/src/ssh.ts`, `sandbox-callback-bridge.t
    - Test: no secret value appears in the `ssh` argv, and the command still sees the env.
 4. **Remote cleanup.** The per-run copy at `<remoteWorkspacePath>/.paperclip-runtime/runs/<runId>` is never deleted. Delete it after a successful restore.
 5. **Timeouts.** A helper timeout of `0` means "no timeout", and a real `execFile` timeout (`killed`, SIGTERM) is not detected. Make `0` use the default, and count `killed`/SIGTERM as a timeout.
+6. **Cost events on the bridge.** Add `POST /api/companies/:companyId/cost-events` to the bridge allowlist in `sandbox-callback-bridge.ts`, so agents can report GPU-hours (Part 6).
 
 Verify with the unit tests above. Also run `server/src/__tests__/environment-live-ssh.test.ts` against a real box with `PAPERCLIP_ENV_LIVE_SSH_*`.
 
@@ -82,25 +83,28 @@ Verify with the unit tests above. Also run `server/src/__tests__/environment-liv
 
 ## Part 3: set up each HPC box (runbook)
 
-1. **Account.** Create a dedicated `paperclip` user with no sudo and no `docker` group. Gemini CLI and OpenCode delete `~/.gemini/skills` and `~/.claude/skills` in the home directory, so the account must be dedicated.
-2. **GPU.** Install an NVIDIA driver version 570 or later (Blackwell). Apptainer's `--nv` binds the driver libraries itself, so no container toolkit is needed.
+1. **Account.** Create a dedicated `paperclip` user with no sudo and no `docker` group. Gemini CLI and OpenCode delete `~/.gemini/skills` and `~/.claude/skills` in the home directory, so the account must be dedicated. Set `PATH` in `~/.profile`, because Ubuntu's `.bashrc` exits early in non-interactive shells.
+2. **GPU.** Install an NVIDIA driver version 570 or later (Blackwell). Apptainer's `--nv` binds the driver libraries itself, so no container toolkit is needed. Hold every installed `nvidia-*` and `libnvidia-*` package plus the running kernel (`apt-mark hold`), or use NVIDIA's driver-pinning package, so the driver cannot change under running jobs.
 3. **Slurm, single node.**
    - Ubuntu 24.04: `slurm-wlm munge slurm-wlm-nvml-plugin`. Rocky 9: the OpenHPC 3.x repo.
    - `slurm.conf`: `SelectType=select/cons_tres`, `ProctrackType=proctrack/cgroup`, `TaskPlugin=task/cgroup,task/affinity`, `GresTypes=gpu`, and a `NodeName` line with CPUs, `RealMemory` and `Gres`.
    - `gres.conf`: `AutoDetect=nvml`.
-   - `cgroup.conf`: `ConstrainCores`, `ConstrainRAMSpace` and `ConstrainDevices`, all set to `yes`.
+   - `cgroup.conf`: `ConstrainCores`, `ConstrainRAMSpace` and `ConstrainDevices`, all set to `yes`. `ConstrainRAMSpace` is off by default, and it is what flags out-of-memory jobs.
+   - **Job history without a database.** Ubuntu 24.04 ships Slurm 23.11. Set `JobCompType=jobcomp/filetxt`, `JobCompLoc=/var/log/slurm/jobcomp.log`, `JobAcctGatherType=jobacct_gather/cgroup` and `AccountingStorageTRES=gres/gpu`, then read finished jobs with `sacct -c`. Without this, a finished job leaves `scontrol` after `MinJobAge` (300 s).
+   - **Partition limits** (no database needed): `DefaultTime=04:00:00`, `MaxTime=7-00:00:00`, `MaxMemPerNode` and `MaxCPUsPerNode`.
 4. **Apptainer, and rootless Podman** with subuid/subgid ranges for `paperclip`.
 5. **Nextflow** (Java 17 or later), plus `/etc/paperclip-hpc/nextflow.config`. Nextflow fetches nf-core pipelines itself. The config sets:
    - `process.executor = 'slurm'`
    - `apptainer.enabled = true`
    - `apptainer.cacheDir = '/data/cache/apptainer'`
    - a `gpu` label that sets `clusterOptions = '--gres=gpu:1'` and `containerOptions = '--nv'`
-6. **Agent runtime.** Node.js 22 or later, git, tar, and the agent CLIs (`claude`, `gemini`) on the login-profile `PATH`.
+6. **Agent runtime.** Node.js 22 or later, git, tar, `curl`, `jq`, and the agent CLIs (`claude`, `gemini`) on the login-profile `PATH`. Pin versions in the environment's env vars: `NXF_VER=<version>`, and `DISABLE_AUTOUPDATER=1` for Claude Code. For Gemini CLI, set `general.enableAutoUpdate` to `false` in its settings, after checking the key against the installed version.
 7. **Directories.**
    - `/data/jobs`: read-write for `paperclip`.
    - `/data/refs`: read-only in jobs.
    - `/data/images`: `.sif` files.
 8. **Smoke tests.**
+   - `bash hpc-doctor` (Part 6) passes.
    - `sbatch --gres=gpu:1 --wrap "apptainer exec --nv <image> nvidia-smi -L"`. It must show exactly one GPU.
    - `nextflow run nf-core/demo -r <tag> -profile test,apptainer -c /etc/paperclip-hpc/nextflow.config`.
    - A Podman build that becomes a `.sif` and runs with `--nv`.
@@ -118,6 +122,7 @@ Verify with the unit tests above. Also run `server/src/__tests__/environment-liv
       --bind /data/jobs/<issue>/<job>:/work --bind /data/refs:/refs:ro \
       /data/images/<name>/<tag>-<sha12>.sif python /work/code/train.py"
   ```
+  `--containall` clears the environment, `$HOME` and `/tmp`, and `/tmp` becomes a 64 MiB in-memory session. Pass variables with `--env K=V`, and put scratch space on disk with `--workdir /data/jobs/<issue>/<job>/tmp`.
 - **nf-core.**
   ```
   nextflow run nf-core/<name> -r <tag> -profile apptainer \
@@ -129,13 +134,18 @@ Verify with the unit tests above. Also run `server/src/__tests__/environment-liv
 - **New image.**
   1. Write the Dockerfile under `/data/images/src/<name>/`. Pin the base with `FROM …@sha256:<digest>` and record versions with `LABEL cuda=… torch=…`. `apptainer inspect` shows the labels.
   2. Build and export: `podman build` → `podman save -o <tar>` → `apptainer build /data/images/<name>/<tag>-<sha12>.sif docker-archive:<tar>`.
-  3. Before a CUDA change, compare `nvidia-smi` with the CUDA version. Blackwell needs CUDA 12.8 or later, CUDA 12.x needs driver 525 or later, and CUDA 13.x needs driver 580 or later.
-- **Long work.** Submit the job and write the Slurm job ID on the issue, then end the heartbeat. Later heartbeats check `squeue`, `sacct` or `nextflow log` and report.
-- **Default limits.** 16 CPUs, 64 GB, 1 GPU and 24 h, unless the issue asks for more.
+  3. Before a CUDA change, check it live: compare `nvidia-smi --query-gpu=compute_cap,driver_version` with `torch.cuda.get_arch_list()` in the new image. Blackwell is `sm_120`. CUDA 12.x needs driver 525 or later, and CUDA 13.x needs driver 580 or later.
+- **Long work.** After `sbatch`, set the issue monitor with `PATCH /api/issues/:id` (`executionPolicy.monitor`), then end the heartbeat.
+  - Timing: the first check is in 15 minutes, then the checks back off.
+  - Put the Slurm job ID in `notes`, not in `externalRef`, which Paperclip redacts.
+  - Set `timeoutAt` to the job's `--time` plus a margin, with `recoveryPolicy: escalate_to_board`.
+  - Each monitor wake runs `hpc-status` and reports.
+- **Default limits.** 16 CPUs, 64 GB, 1 GPU and 24 h, unless the issue asks for more. A job longer than 24 h, or one with more than 1 GPU, needs board approval first (`request_board_approval`). The partition `MaxTime` is the hard cap.
+- **Checkpoints.** Long training jobs use `--signal=B:USR1@300`. The batch script traps `USR1` (the payload runs in the background under `wait`), saves a checkpoint, then runs `scontrol requeue $SLURM_JOB_ID`.
 
 ## Part 5: skills and expert agents (configuration)
 
-Skills are markdown, versioned in `doc/hpc/skills/<slug>/SKILL.md`. Import them into the company library pinned to a commit (`POST /api/companies/:companyId/skills/import`). No code change is needed.
+Skills are markdown, versioned in `doc/hpc/skills/<slug>/SKILL.md`. They ship with the agents as one company package (Part 6). No code change is needed.
 
 | Skill | Covers |
 |---|---|
@@ -147,6 +157,27 @@ Skills are markdown, versioned in `doc/hpc/skills/<slug>/SKILL.md`. Import them 
 |---|---|---|
 | HPC Pipeline Engineer | `hpc-jobs`, `hpc-nf-core` | `claude_local`, `engine: "cli"`, the HPC `ssh` environment |
 | ML Environment Engineer | `hpc-jobs`, `hpc-ml-images` | same |
+
+## Part 6: quality of life
+
+Every item reuses a Paperclip feature that already exists.
+
+- **Helper scripts** in the `hpc-jobs` skill's `scripts/` folder. Agents run them with `bash`, because the exec bit can be lost on import. They are tested with fake `sbatch`, `squeue`, `sacct` and `scontrol` commands on `PATH`.
+  - `hpc-submit`: `sbatch --test-only`, then `--parsable`. It writes `logs/<jobid>.status.json` and prints the monitor update.
+  - `hpc-status`: one line per job, from `squeue` and `sacct -c`.
+  - `hpc-diagnose`: maps a failure to a fix. It covers out-of-memory, timeout, `no kernel image`, a driver that is too old, an NVML version mismatch, a full disk, and failed Nextflow tasks.
+  - `hpc-doctor`: checks GPU GRES, Apptainer, rootless Podman (from `podman info`), `NXF_VER`, `/data` permissions, the credential file's mode, and `PATH`.
+- **Job record.** Each issue has one `hpc-jobs` document, a table with the job ID, state, GPU-hours, host path, reproduce command, and image or pipeline revision. Reports up to 10 MB upload as artifacts with `paperclip-upload-artifact.sh`; use MultiQC `--flat` if a report is larger.
+- **GPU-hours.** At job end, `gres/gpu=N` × `ElapsedRaw` from `sacct -c` becomes a cost event (Part 1 item 6).
+  - A marker file stops double reports.
+  - Budgets can stop agents, but they do not cancel running jobs.
+- **Routines.**
+  - A daily digest on a board-created issue: jobs, GPU-hours, failures, `/data` use, and a dry-run cleanup list.
+  - A weekly smoke test (`hpc-doctor`, a GPU job, `nf-core/demo`) that catches driver drift.
+  - Cleanup with `nextflow clean -before <run> -f`, `apptainer cache clean -D 30` and `podman system prune`.
+- **One-command setup.** `doc/hpc/` is a Paperclip company package. It holds the agents, the skills, a project, the routines, and `.paperclip.yaml` (`claude_local`, `engine: cli`).
+  - Import it with `paperclipai company import <repo-url>/doc/hpc --ref <sha> --target existing -C <companyId> --dry-run`, then again without `--dry-run`.
+  - Each agent's default environment is set by hand.
 
 ## Security
 
@@ -168,7 +199,7 @@ Parts 1–3 hold the controls: a dedicated account, no `docker` group, rootless 
 1. `ssh` hardening PR (Part 1).
 2. Box setup and smoke tests (Part 3).
 3. VPN and the `ssh` environment (Part 2).
-4. Skills, agents, and an end-to-end check (Parts 4–5): a GPU job, `nf-core/demo`, and an image update.
+4. The package (skills, agents, routines) and an end-to-end check (Parts 4–6): a GPU job, `nf-core/demo`, and an image update.
 5. Docs: `docs/deploy/hpc-agents.md`.
 
 ## Skipped until needed
@@ -182,6 +213,9 @@ Parts 1–3 hold the controls: a dedicated account, no `docker` group, rootless 
 | A guided HPC setup script | more than one box, or the distribution is fixed |
 | OpenCode or Codex agents | a local model is served with vLLM |
 | MIG or MPS | whole-GPU scheduling is too coarse |
+| The Slurm accounting database (slurmdbd), for QOS and `sreport` | per-user quotas are needed |
+| `job_submit.lua` | partition limits are not enough |
+| A push wake when a job ends | 15-minute checks are too slow. This needs a stored credential on the box. |
 
 ## Risks
 
@@ -189,6 +223,7 @@ Parts 1–3 hold the controls: a dedicated account, no `docker` group, rootless 
 - `ControlPersist` can hang `execFile` (Part 1.1). Test it first.
 - The restore copies workspace files back to Cloud Run memory. The skill rule keeps data out, and a size cap can come later.
 - After a Cloud Run restart, the bridge gateway keeps running on the box. Clean it up later.
+- On Slurm 23.11, an out-of-memory step is flagged but keeps running (`OOMKillStep` needs 24.11). `hpc-diagnose` watches for it.
 
 ## Sources
 
@@ -201,3 +236,7 @@ Parts 1–3 hold the controls: a dedicated account, no `docker` group, rootless 
 - Rootless Podman: https://github.com/containers/podman/blob/main/docs/tutorials/rootless_tutorial.md
 - Claude Code on Vertex AI: https://code.claude.com/docs/en/google-vertex-ai
 - Workload Identity Federation: https://cloud.google.com/iam/docs/workload-identity-federation-with-other-providers
+- Slurm job completion log, `sacct`, and `sbatch` signals: https://slurm.schedmd.com/slurm.conf.html, https://slurm.schedmd.com/sacct.html, https://slurm.schedmd.com/sbatch.html
+- Apptainer environment and `--containall`: https://apptainer.org/docs/user/main/environment_and_metadata.html
+- Nextflow `log` and `clean`: https://docs.seqera.io/nextflow/reference/cli/log, https://docs.seqera.io/nextflow/reference/cli/clean
+- Claude Code setup (auto-update): https://code.claude.com/docs/en/setup
