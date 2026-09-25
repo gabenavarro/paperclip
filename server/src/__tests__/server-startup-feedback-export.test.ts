@@ -402,6 +402,7 @@ vi.mock("../board-claim.js", () => ({
 }));
 
 vi.mock("../auth/better-auth.js", () => ({
+  buildBetterAuthGoogleOptions: vi.fn(() => ({})),
   createBetterAuthHandler: vi.fn(() => undefined),
   createBetterAuthInstance: createBetterAuthInstanceMock,
   deriveAuthTrustedOrigins: deriveAuthTrustedOriginsMock,
