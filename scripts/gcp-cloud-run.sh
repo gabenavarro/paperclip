@@ -19,6 +19,8 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # gcloud must never wait on a hidden prompt; this script asks the questions.
 export CLOUDSDK_CORE_DISABLE_PROMPTS=1
+# gcloud's debug log records every argument, including the Cloud SQL password flag.
+export CLOUDSDK_CORE_DISABLE_FILE_LOGGING=1
 CONFIG_FILE="$REPO_ROOT/secrets/cloud-run.env"
 YES=0
 DRY_RUN=0
@@ -282,7 +284,7 @@ step_account() {
   if [ -z "$ACCOUNT" ]; then
     say "  gcloud has no active account."
     confirm "Run 'gcloud auth login' now?" || die "sign in with 'gcloud auth login', then run setup again"
-    run gcloud auth login
+    run env CLOUDSDK_CORE_DISABLE_PROMPTS=0 gcloud auth login
     ACCOUNT=$(lookup gcloud config get-value account)
   fi
   say "  Signed in as $ACCOUNT"
@@ -293,10 +295,12 @@ step_project() {
   say "  Paperclip gets its own Google Cloud project, or reuses one you already have."
   ask PROJECT "Project ID (6-30 characters: lowercase letters, digits, hyphens)" "paperclip-$(date +%y%m%d)"
   matches "$PROJECT" '^[a-z][a-z0-9-]{4,28}[a-z0-9]$' || die "invalid project ID: $PROJECT"
-  if ensure_resource "project $PROJECT" gcloud projects describe "$PROJECT"; then
-    :
+  # A project you cannot see answers 403, like one that does not exist; list instead.
+  if [ -n "$(lookup gcloud projects list --filter="projectId=$PROJECT" --format='value(projectId)')" ]; then
+    say "  ✓ project $PROJECT already exists"
   else
-    say "  Project $PROJECT does not exist yet; it will be created."
+    say "  Project $PROJECT is not among the projects you can see; it will be created."
+    say "  (If someone else already owns this ID, creation fails and you can choose another.)"
     run gcloud projects create "$PROJECT" --name="Paperclip"
     PROJECT_CREATED=1
   fi
@@ -721,12 +725,17 @@ EOF
   build_id=$(gcloud builds submit "$src" --project="$PROJECT" --config="$WORK_DIR/cloudbuild.yaml" --async --format='value(id)') ||
     { hint_for gcloud builds submit; die "could not start the build"; }
   say "  Build $build_id: https://console.cloud.google.com/cloud-build/builds/$build_id?project=$PROJECT"
+  local waited=0 misses=0
   while :; do
     status=$(lookup gcloud builds describe "$build_id" --project="$PROJECT" --format='value(status)')
     case "$status" in
       SUCCESS) say "  ✓ build succeeded"; return 0 ;;
       FAILURE|INTERNAL_ERROR|TIMEOUT|CANCELLED|EXPIRED) die "build $build_id ended with $status; open the link above for its log" ;;
+      '') misses=$((misses + 1)); [ "$misses" -lt 10 ] || die "cannot read the status of build $build_id; open the link above" ;;
+      *) misses=0 ;;
     esac
+    waited=$((waited + 30))
+    [ "$waited" -lt 7200 ] || die "stopped waiting after 2 hours; build $build_id may still be running (link above)"
     sleep 30
   done
 }
@@ -814,12 +823,14 @@ cmd_deploy() {
     --set-secrets="$secrets"
 
   [ "$DRY_RUN" = 1 ] && return 0
-  local health
-  health=$(curl -fsS --max-time 20 "$url/api/health" || true)
-  say "  Health: ${health:-no response yet}"
-  case "$health" in
-    *'"status":"ok"'*) say "  ✓ Paperclip is up at $url" ;;
-    *) warn "the service did not report status ok yet; check the logs: gcloud run services logs read $SERVICE --region=$REGION --project=$PROJECT" ;;
+  local code health
+  code=$(curl -sS -o "$WORK_DIR/health.json" -w '%{http_code}' --max-time 20 "$url/api/health" 2>/dev/null || true)
+  health=$(cat "$WORK_DIR/health.json" 2>/dev/null || true)
+  case "$code:$health" in
+    200:*'"status":"ok"'*) say "  Health: $health"; say "  ✓ Paperclip is up at $url" ;;
+    403:*) warn "the service answered 403, so it is not public. Your organization likely blocks allUsers" \
+      "(organization policy iam.allowedPolicyMemberDomains); ask an organization admin to allow it for $PROJECT, then run deploy again" ;;
+    *) warn "no healthy answer yet (HTTP ${code:-none}); check the logs: gcloud run services logs read $SERVICE --region=$REGION --project=$PROJECT" ;;
   esac
 }
 
@@ -829,12 +840,13 @@ cmd_bootstrap_admin() {
   require_config
   apply_defaults
   resolve_project_number
-  local job="$SERVICE-bootstrap-admin" url image line=""
+  local job="$SERVICE-bootstrap-admin" url image line="" start
   url=$(public_url)
   image=$(lookup gcloud run services describe "$SERVICE" --region="$REGION" --project="$PROJECT" --format='value(spec.template.spec.containers[0].image)')
   [ -n "$image" ] || image=$(image_ref)
   say "  A one-off Cloud Run job creates a single-use invite for the first instance admin"
   say "  (valid 72 hours). It runs inside the VPC, next to the database."
+  start=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   run gcloud run jobs deploy "$job" --project="$PROJECT" --region="$REGION" --image="$image" \
     --service-account="$RUNTIME_SA" --network="$NETWORK" --subnet="$SUBNET" --vpc-egress=private-ranges-only \
     --set-secrets="DATABASE_URL=$(secret_name database-url):latest" --memory=1Gi \
@@ -842,7 +854,8 @@ cmd_bootstrap_admin() {
     --max-retries=0 --task-timeout=600 --execute-now --wait
   [ "$DRY_RUN" = 1 ] && return 0
   for _ in 1 2 3 4 5 6; do
-    line=$(lookup gcloud run jobs logs read "$job" --region="$REGION" --project="$PROJECT" --limit=50 | grep -o 'https://[^[:space:]"]*/invite/pcp_bootstrap_[0-9a-f]*' | tail -n 1)
+    line=$(lookup gcloud run jobs logs read "$job" --region="$REGION" --project="$PROJECT" --limit=50 \
+      --log-filter="timestamp>=\"$start\"" | grep -o 'https://[^[:space:]"]*/invite/pcp_bootstrap_[0-9a-f]*' | tail -n 1 || true)
     [ -n "$line" ] && break
     sleep 5
   done

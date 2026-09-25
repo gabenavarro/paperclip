@@ -12,14 +12,20 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 const script = path.join(repoRoot, "scripts", "gcp-cloud-run.sh");
 
 const STUB_GCLOUD = `#!/usr/bin/env bash
-printf '%s\\n' "$*" >> "$GCLOUD_LOG"
+printf '%s|%s\\n' "\${CLOUDSDK_CORE_DISABLE_FILE_LOGGING:-}" "$*" >> "$GCLOUD_LOG"
 case "$*" in
-  "config get-value account"*) echo "owner@example.com" ;;
+  "config get-value account"*) [ -n "\${STUB_NO_ACCOUNT:-}" ] || echo "owner@example.com" ;;
+  "projects list"*) if [ -n "\${STUB_EXISTING:-}" ]; then echo "pc-existing"; fi ;;
+  "run services describe"*) echo "us-central1-docker.pkg.dev/pc-existing/webapps/paperclip:test" ;;
+  "run jobs logs read"*)
+    n=$(cat "$GCLOUD_LOG.reads" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$GCLOUD_LOG.reads"
+    if [ "$n" -ge 2 ]; then echo "https://paperclip-123456789012.us-central1.run.app/invite/pcp_bootstrap_0123456789abcdef0123456789abcdef0123456789abcdef"; else echo "Container started"; fi ;;
   "billing accounts list"*) echo "billingAccounts/000000-AAAAAA-BBBBBB" ;;
   "builds get-default-service-account"*) echo "123456789012-compute@developer.gserviceaccount.com" ;;
   "projects describe"*)
     if [ -n "\${STUB_EXISTING:-}" ]; then echo "123456789012"; exit 0; fi
-    echo "ERROR: (gcloud) NOT_FOUND: The resource was not found." >&2; exit 1 ;;
+    # Resource Manager answers 403, not 404, for a project that does not exist.
+    echo "ERROR: (gcloud.projects.describe) [owner@example.com] does not have permission to access projects instance [pc-new-project] (or it may not exist): The caller does not have permission" >&2; exit 1 ;;
   "billing projects describe"*)
     if [ -n "\${STUB_EXISTING:-}" ]; then echo "ERROR: PERMISSION_DENIED: Cloud Billing API has not been used" >&2; exit 1; fi
     echo "ERROR: (gcloud) NOT_FOUND: The resource was not found." >&2; exit 1 ;;
@@ -206,4 +212,44 @@ test("setup on an existing project keeps going when billing status cannot be rea
   assert.match(result.stderr, /cannot read the billing status/);
   // "HTTPError 404: Not Found" (Cloud SQL) counts as missing, so the user is created.
   assert.match(result.stdout, /gcloud sql users create paperclip/);
+});
+
+test("gcloud never writes this script's commands (with a password flag) to its own log file", () => {
+  const sandbox = setupSandbox({ PROJECT: "pc-new-project", REGION: "us-central1", IMAGE_TAG: "test", ALLOWED_EMAILS: "owner@example.com" });
+  const result = runScript(sandbox, ["setup", "--dry-run", "--yes"]);
+  assert.equal(result.status, 0, result.stderr);
+  const lines = result.calls.trim().split("\n");
+  assert.ok(lines.length > 5);
+  for (const line of lines) assert.ok(line.startsWith("1|"), `file logging not disabled for: ${line}`);
+});
+
+test("setup signs in with gcloud auth login when no account is active", () => {
+  const sandbox = setupSandbox({ PROJECT: "pc-new-project", REGION: "us-central1", IMAGE_TAG: "test", ALLOWED_EMAILS: "owner@example.com" });
+  const result = runScript(sandbox, ["setup", "--dry-run", "--yes"], { STUB_NO_ACCOUNT: "1" });
+  assert.equal(result.status, 0, result.stderr);
+  // gcloud auth login must be allowed to prompt, although the script turns prompts off elsewhere.
+  assert.match(result.stdout, /\$ env CLOUDSDK_CORE_DISABLE_PROMPTS=0 gcloud auth login/);
+});
+
+test("bootstrap-admin keeps reading the job logs until the invite appears", () => {
+  const sandbox = setupSandbox(EXISTING);
+  const result = runScript(sandbox, ["bootstrap-admin", "--yes"]);
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.match(result.stdout, /First-admin invite \(single use, 72 hours\): https:\/\/paperclip-123456789012\.us-central1\.run\.app\/invite\/pcp_bootstrap_[0-9a-f]{48}/);
+  // Only this run's entries: a previous run's (now revoked) invite must not match.
+  assert.match(result.calls, /run jobs logs read paperclip-bootstrap-admin .*--log-filter=timestamp>=/);
+});
+
+test("deploy explains a 403 from the new service as an organization policy on public access", () => {
+  const sandbox = setupSandbox(EXISTING);
+  writeFileSync(path.join(sandbox.bin, "curl"), `#!/usr/bin/env bash
+out=""
+while [ $# -gt 0 ]; do case "$1" in -o) out=$2; shift ;; esac; shift; done
+[ -n "$out" ] && printf 'Forbidden' > "$out"
+printf '403'
+`);
+  chmodSync(path.join(sandbox.bin, "curl"), 0o755);
+  const result = runScript(sandbox, ["deploy", "--yes"], { STUB_IMAGE_EXISTS: "1" });
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.match(result.stderr, /iam\.allowedPolicyMemberDomains/);
 });

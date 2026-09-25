@@ -8,7 +8,9 @@ Deploy Paperclip to Google Cloud with one guided script. The result:
 - **Cloud Run** runs one always-on instance of the production image. Paperclip's schedulers and agent runs live in that process.
 - **Cloud SQL for PostgreSQL** holds the data. The instance has a private IP only, and Cloud Run reaches it through **Direct VPC egress**.
 - **Cloud Storage** holds uploads, agent instructions and skills (GCS FUSE volumes), so they survive redeploys.
-- **Secret Manager** holds every secret. Nothing secret is baked into the image or passed on a command line you can see.
+- **Secret Manager** holds every secret. Nothing secret is baked into the image.
+  - The script passes secret values to gcloud on stdin.
+  - The one exception is the generated Cloud SQL password: gcloud accepts it only as a flag. For that reason the script turns off gcloud's own file log (`CLOUDSDK_CORE_DISABLE_FILE_LOGGING=1`), which would otherwise record every argument.
 - **Sign in with Google** (OAuth 2.0) for board users, limited to the email domains or addresses you allow.
 - **Gemini on Vertex AI** through the service's own identity (Application Default Credentials): no API key, no key file. Default model: `gemini-3.8-flash`.
 - Optional: **self-hosted OpenAI-compatible LLMs** (vLLM, TGI, Ollama, LiteLLM) on private addresses in your VPC, for OpenCode agents.
@@ -137,6 +139,8 @@ A new `db-f1-micro` Cloud SQL instance adds about $10 per month. Vertex AI calls
 - **One instance.** Paperclip keeps its event bus and schedulers in the process. `--max-instances=1` is required; a rollout briefly overlaps the old and new revision.
 - **Ephemeral files.** Agent workspaces, git checkouts and run logs are on the container's in-memory disk, and a restart loses them. Workspaces are cloned again on demand.
 - **Gemini CLI engine.** It needs `GEMINI_CLI_TRUST_WORKSPACE=true` on a headless host (the script sets it). Without it, Gemini CLI refuses to run in an untrusted folder.
+- **Agents run as the service.** Paperclip runs agents in the same container as the server. Every agent can therefore use the runtime service account (Vertex AI, the bucket, and this service's secrets) and the server's environment. Give agents only work you would give the operator.
+- **Startup ownership check.** At start, the image's entrypoint walks the files under `/paperclip`, including the mounted buckets, to check who owns them. Startup gets slower as the buckets grow.
 - **Image drift.** The production image installs agent CLIs at their latest versions, so two builds of the same commit can differ.
 - **Organization policies** can block steps. The script names the policy when a step fails:
   - `iam.allowedPolicyMemberDomains` blocks public (`allUsers`) access.
