@@ -161,6 +161,8 @@ test("deploy keeps the flags the service depends on", () => {
   assert.match(deployLine, /only-dir=companies\\?;uid=1000\\?;gid=1000/);
   assert.match(deployLine, /DATABASE_URL=paperclip-database-url:latest/);
   assert.match(deployLine, /PAPERCLIP_AUTH_GOOGLE_CLIENT_SECRET=paperclip-google-oauth-client-secret:latest/);
+  // The service has no terminal, so the "run claude auth login" sign-in is off.
+  assert.match(result.stdout, /PAPERCLIP_LOCAL_AI_LOGIN_ENABLED: 'false'/);
 });
 
 test("deploy builds the committed tree, not the working directory", () => {

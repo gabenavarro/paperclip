@@ -251,6 +251,7 @@ const MODEL_SOURCE_INLINE_MARKS: Record<string, ComponentType<{ className?: stri
 const API_KEY_ENV_KEYS: Record<string, string> = {
   claude_local: ANTHROPIC_API_KEY_ENV_KEY,
   codex_local: "OPENAI_API_KEY",
+  gemini_local: "GEMINI_API_KEY",
 };
 
 function apiKeyEnvKeyFor(adapterType: string): string {
@@ -1049,6 +1050,9 @@ function OnboardingWizardInner({
   // sandbox image rather than held on the host reads as `absent` even though
   // the owner could already sign in — the panel then shows for one extra step
   // it did not strictly need, never the reverse.
+  // A source with no managed sign-in (Gemini) asks too: a hosted server can
+  // already hold its credentials (Vertex AI), and then there is nothing to do.
+  const authSignalApplies = canShowAdapterLogin || !managedProvider;
   const authSignalQuery = useQuery({
     queryKey: createdCompanyId
       ? queryKeys.agents.authSignal(createdCompanyId, adapterType, resolvedLoginEnvironmentId)
@@ -1060,7 +1064,7 @@ function OnboardingWizardInner({
         resolvedLoginEnvironmentId ?? undefined,
       ),
     enabled:
-      Boolean(createdCompanyId) && effectiveOnboardingOpen && step === 4 && canShowAdapterLogin,
+      Boolean(createdCompanyId) && effectiveOnboardingOpen && step === 4 && authSignalApplies,
   });
   const authSignalStatus = authSignalQuery.data?.status ?? null;
   const showAdapterLoginPanel =
@@ -1115,7 +1119,7 @@ function OnboardingWizardInner({
    * then replace it with a sign-in prompt. A reassurance that is wrong and then
    * withdrawn is worse than saying nothing for a beat.
    */
-  const authSignalUndecided = canShowAdapterLogin && authSignalStatus === null;
+  const authSignalUndecided = authSignalApplies && authSignalStatus === null;
 
   const isLocalAdapterCaps =
     adapterCaps.supportsInstructionsBundle ||
@@ -1213,7 +1217,7 @@ function OnboardingWizardInner({
 
   /** Without browser login, show instructions for the selected execution environment. */
   const connectStepHasNoSandbox =
-    credentialMode !== "api" && !canShowAdapterLogin && !authSignalUndecided;
+    credentialMode !== "api" && !canShowAdapterLogin && !authSignalUndecided && authSignalStatus !== "present";
 
   /*
     The sequence's derived state. Space and visibility are separate throughout:

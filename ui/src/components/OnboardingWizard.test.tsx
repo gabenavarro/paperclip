@@ -193,12 +193,12 @@ vi.mock("../adapters/metadata", () => ({ isVisualAdapterChoice: () => true }));
 vi.mock("../adapters/adapter-display-registry", () => ({
   getAdapterDisplay: (type: string) => ({
     type,
-    // Mirrors the real registry, where these two and only these two are
+    // Mirrors the real registry, where these three and only these three are
     // `recommended`. A blanket `false` used to be harmless because every adapter
     // then sat in the "Advanced settings" disclosure and was reachable anyway;
     // with the step down to a tile row built from this flag, it made that row
     // empty in every test and hid the surface under it.
-    recommended: type === "claude_local" || type === "codex_local",
+    recommended: type === "claude_local" || type === "codex_local" || type === "gemini_local",
     label: type,
     description: "",
     icon: () => null,
@@ -3398,6 +3398,66 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
       );
 
       await act(async () => root.unmount());
+    });
+
+    // A hosted server (Cloud Run) runs Gemini on Vertex AI with its own service
+    // account and has no terminal to sign in from.
+    describe("Gemini on a hosted server", () => {
+      beforeEach(() => {
+        localHealth.get.mockResolvedValue({ deploymentMode: "authenticated", localAiLoginSupported: false });
+        mockEnvironmentsApi.list.mockResolvedValue([LOCAL_ENVIRONMENT]);
+        mockInstanceSettingsApi.get.mockResolvedValue({ defaultEnvironmentId: null });
+        mockAdapterRegistry.list = [{ type: "claude_local" }, { type: "codex_local" }, { type: "gemini_local" }];
+        mockAgentsApi.testEnvironment.mockResolvedValue({ adapterType: "gemini_local", status: "pass", checks: [], testedAt: new Date().toISOString() });
+      });
+
+      async function pressConnect() {
+        const connect = [...document.body.querySelectorAll("button")].find(b => b.textContent?.trim().startsWith("Connect"));
+        expect(connect, "Connect").toBeTruthy();
+        await act(async () => connect!.click());
+        for (let i = 0; i < 6; i++) await flushReact();
+        return (mockAgentsApi.hire.mock.calls.at(-1) as unknown[] | undefined)?.[1] as
+          | { adapterType: string; adapterConfig: { env?: Record<string, unknown> } }
+          | undefined;
+      }
+
+      it("hires Gemini on the server's credentials, with no key and no sign-in", async () => {
+        mockAgentsApi.getAdapterAuthSignal.mockResolvedValue({ status: "present" });
+        const { root } = await openStep4({ adapterType: "gemini_local" });
+        await pickSource(/Gemini/);
+
+        expect(document.body.textContent).toContain("An existing provider connection is available.");
+        expect(document.body.textContent).not.toContain("does not support browser sign-in");
+        const hire = await pressConnect();
+        expect(hire?.adapterType).toBe("gemini_local");
+        expect(hire?.adapterConfig.env ?? {}).toEqual({});
+        await act(async () => root.unmount());
+      });
+
+      it("says nothing about sign-in while the server has not answered", async () => {
+        mockAgentsApi.getAdapterAuthSignal.mockReturnValue(new Promise(() => {}));
+        const { root } = await openStep4({ adapterType: "gemini_local" });
+        await pickSource(/Gemini/);
+
+        expect(document.body.textContent).not.toContain("does not support browser sign-in");
+        await act(async () => root.unmount());
+      });
+
+      it("binds a typed Gemini key to GEMINI_API_KEY", async () => {
+        mockAgentsApi.getAdapterAuthSignal.mockResolvedValue({ status: "unknown" });
+        mockSecretsApi.listMyUserSecrets.mockResolvedValue([]);
+        mockSecretsApi.createUserSecretDefinition.mockResolvedValue({ id: "def-1" });
+        mockSecretsApi.createMyUserSecret.mockResolvedValue({ id: "secret-abc" });
+        const { root } = await openStep4({ adapterType: "gemini_local", credentialMode: "api" });
+        await pickSource(/Gemini/);
+        const field = document.body.querySelector('input[type="password"]') as HTMLInputElement;
+        await act(async () => setControlledValue(field, "gemini-key-typed"));
+        await flushReact();
+
+        const hire = await pressConnect();
+        expect(Object.keys(hire?.adapterConfig.env ?? {})).toEqual(["GEMINI_API_KEY"]);
+        await act(async () => root.unmount());
+      });
     });
   });
 });
