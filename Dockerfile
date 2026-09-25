@@ -161,8 +161,12 @@ RUN echo "cli-tools-epoch: ${CLI_TOOLS_CACHE_EPOCH}" \
   && apt-get update \
   && apt-get install -y --no-install-recommends openssh-client jq \
   && rm -rf /var/lib/apt/lists/* \
-  && mkdir -p /paperclip \
-  && chown node:node /paperclip
+  # Pre-create the default instance tree so platforms that mount volumes inside
+  # it (Cloud Run GCS volumes at instances/default/{companies,data/storage,skills})
+  # do not create root-owned parents. The entrypoint would then chown -R through
+  # every mounted bucket on each boot.
+  && mkdir -p /paperclip/instances/default/data \
+  && chown -R node:node /paperclip
 
 COPY scripts/docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
