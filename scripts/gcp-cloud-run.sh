@@ -10,7 +10,6 @@
 #   --key-file FILE  use a service-account key for gcloud without changing your gcloud config
 #   --yes            accept every default (non-interactive)
 #   --dry-run        print the commands that change things; run only read-only checks
-#   --local-build    build with the local docker daemon instead of Cloud Build
 #
 # Every step explains what it does, detects what already exists, shows the exact
 # gcloud command, and asks before it runs. Guide: docs/deploy/gcp-cloud-run.md
@@ -24,7 +23,6 @@ export CLOUDSDK_CORE_DISABLE_FILE_LOGGING=1
 CONFIG_FILE="$REPO_ROOT/secrets/cloud-run.env"
 YES=0
 DRY_RUN=0
-LOCAL_BUILD=0
 COMMAND=""
 STEP=0
 STEPS=17
@@ -186,18 +184,6 @@ confirm() { # default yes
   case "$answer" in [Nn]*) return 1 ;; *) return 0 ;; esac
 }
 
-choose() { # choose VAR "Question" DEFAULT_INDEX option...
-  local var=$1 question=$2 default=$3 i=1 answer="" option
-  shift 3
-  say "  $question"
-  for option in "$@"; do say "    $i) $option"; i=$((i + 1)); done
-  if [ "$YES" = 1 ]; then answer=$default; else read -r -p "  Choose [$default]: " answer || true; fi
-  answer=${answer:-$default}
-  case "$answer" in *[!0-9]*|'') answer=$default ;; esac
-  [ "$answer" -ge 1 ] && [ "$answer" -le $# ] || answer=$default
-  [ "$YES" = 1 ] && say "  Choice: $answer"
-  printf -v "$var" '%s' "$answer"
-}
 
 matches() { printf '%s' "$1" | grep -Eq "$2"; }
 
@@ -378,7 +364,7 @@ step_build_identity() {
   build_sa=$(lookup gcloud builds get-default-service-account --project="$PROJECT" --format='value(serviceAccountEmail)')
   build_sa=${build_sa##*/}
   case "$build_sa" in
-    '') warn "could not read the Cloud Build service account; if the build fails, use --local-build" ;;
+    '') warn "could not read the Cloud Build service account; if the build fails, ask an admin to grant it roles/cloudbuild.builds.builder" ;;
     *@cloudbuild.gserviceaccount.com) say "  ✓ $build_sa (legacy Cloud Build account; it has these roles by default)" ;;
     *)
       say "  Cloud Build runs as $build_sa. New projects give it no roles; granting the"
@@ -426,33 +412,21 @@ step_network() {
   fi
 }
 
-# Private IP of a Cloud SQL instance, from "TYPE;TYPE<TAB>IP;IP".
 sql_private_ip() {
-  local raw types addrs type addr
-  raw=$(lookup gcloud sql instances describe "$1" --project="$PROJECT" --format='value(ipAddresses.type,ipAddresses.ipAddress)')
-  types=${raw%%$'\t'*}
-  addrs=${raw#*$'\t'}
-  while [ -n "$types" ]; do
-    type=${types%%;*}
-    addr=${addrs%%;*}
-    if [ "$type" = PRIVATE ]; then printf '%s' "$addr"; return 0; fi
-    [ "$types" = "$type" ] && break
-    types=${types#*;}
-    addrs=${addrs#*;}
-  done
+  lookup gcloud sql instances describe "$1" --project="$PROJECT" --flatten=ipAddresses \
+    --format='value(ipAddresses.type,ipAddresses.ipAddress)' | awk '$1 == "PRIVATE" { print $2 }'
 }
 
 step_database() {
   header "Database (Cloud SQL for PostgreSQL)"
   say "  Paperclip keeps its data in PostgreSQL. Cloud Run has no persistent disk."
-  local choice url_secret ip password
+  local url_secret ip password
   url_secret=$(secret_name database-url)
-  case "$DB_MODE" in new) choice=1 ;; existing) choice=2 ;; url) choice=3 ;; *) choice=1 ;; esac
-  choose choice "Where should the database live?" "$choice" \
-    "New Cloud SQL instance, private IP only (db-f1-micro, about \$10/month, 5-10 minutes to create)" \
-    "Existing Cloud SQL instance with a private IP on this network (a new database and user)" \
-    "An existing PostgreSQL 15+ connection string"
-  case "$choice" in 1) DB_MODE=new ;; 2) DB_MODE=existing ;; 3) DB_MODE=url ;; esac
+  say "  new:      a new Cloud SQL instance, private IP only (db-f1-micro, about \$10/month, 5-10 minutes to create)"
+  say "  existing: an existing Cloud SQL instance with a private IP on this network (a new database and user)"
+  say "  url:      an existing PostgreSQL 15+ connection string"
+  ask DB_MODE "Where should the database live? (new, existing or url)" "${DB_MODE:-new}"
+  case "$DB_MODE" in new|existing|url) ;; *) die "answer new, existing or url" ;; esac
 
   if [ "$DB_MODE" = url ]; then
     if ensure_resource "secret $url_secret" gcloud secrets describe "$url_secret" --project="$PROJECT"; then return 0; fi
@@ -597,15 +571,7 @@ step_google_signin() {
 }
 
 is_private_host() {
-  local host=$1 a b rest
-  case "$host" in localhost|*.internal|*.local) return 0 ;; esac
-  matches "$host" '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || return 1
-  a=${host%%.*}; rest=${host#*.}; b=${rest%%.*}
-  [ "$a" = 10 ] && return 0
-  [ "$a" = 192 ] && [ "$b" = 168 ] && return 0
-  [ "$a" = 172 ] && [ "$b" -ge 16 ] && [ "$b" -le 31 ] && return 0
-  [ "$a" = 100 ] && [ "$b" -ge 64 ] && [ "$b" -le 127 ] && return 0
-  return 1
+  matches "$1" '^(10|192\.168|172\.(1[6-9]|2[0-9]|3[01])|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7]))\.|\.internal$|\.local$|^localhost$'
 }
 
 step_private_llm() {
@@ -697,17 +663,6 @@ build_image() {
   print_cmd git -C "$REPO_ROOT" archive --format=tar.gz --output="$src" HEAD
   [ "$DRY_RUN" = 1 ] || git -C "$REPO_ROOT" archive --format=tar.gz --output="$src" HEAD
 
-  if [ "$LOCAL_BUILD" = 1 ]; then
-    print_cmd docker build --target production --build-arg "PAPERCLIP_BUILD_COMMIT=$commit" --tag "$image" - "<" "$src"
-    if [ "$DRY_RUN" != 1 ]; then
-      approve || die "stopped before a required step; run the script again when you are ready"
-      docker build --target production --build-arg "PAPERCLIP_BUILD_COMMIT=$commit" --tag "$image" - < "$src"
-      gcloud auth print-access-token | docker login -u oauth2accesstoken --password-stdin "https://$REGION-docker.pkg.dev"
-    fi
-    run docker push "$image"
-    return 0
-  fi
-
   cat > "$WORK_DIR/cloudbuild.yaml" <<EOF
 steps:
   - name: gcr.io/cloud-builders/docker
@@ -746,13 +701,8 @@ EOF
 yaml_line() { printf "%s: '%s'\n" "$1" "$(printf '%s' "$2" | sed "s/'/''/g")"; }
 
 opencode_providers_json() {
-  local models="" model rest=$PRIVATE_LLM_MODELS
-  while [ -n "$rest" ]; do
-    model=${rest%%,*}
-    models="$models${models:+,}\"$model\":{}"
-    [ "$rest" = "$model" ] && break
-    rest=${rest#*,}
-  done
+  local models
+  models=$(printf '%s' "$PRIVATE_LLM_MODELS" | sed 's/[^,]*/"&":{}/g')
   printf '{"private":{"npm":"@ai-sdk/openai-compatible","name":"Private LLM","options":{"baseURL":"{env:PRIVATE_LLM_BASE_URL}","apiKey":"{env:PRIVATE_LLM_API_KEY}"},"models":{%s}}}' "$models"
 }
 
@@ -910,7 +860,6 @@ while [ $# -gt 0 ]; do
     --key-file) export CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE; CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE="$(cd "$(dirname "${2:?--key-file needs a file}")" && pwd)/$(basename "$2")"; shift ;;
     --yes|-y) YES=1 ;;
     --dry-run) DRY_RUN=1 ;;
-    --local-build) LOCAL_BUILD=1 ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; die "unknown argument: $1" ;;
   esac

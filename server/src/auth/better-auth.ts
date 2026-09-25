@@ -118,10 +118,9 @@ export function buildBetterAuthGoogleOptions(env: NodeJS.ProcessEnv = process.en
                 before: async (user: { email?: string | null }) => {
                   const email = user.email?.trim().toLowerCase() ?? "";
                   const domain = email.slice(email.lastIndexOf("@") + 1);
-                  if (email.includes("@") && (allowedEmails.includes(email) || allowedDomains.includes(domain))) {
-                    return;
-                  }
-                  return false;
+                  return email.includes("@") && (allowedEmails.includes(email) || allowedDomains.includes(domain))
+                    ? undefined
+                    : false;
                 },
               },
             },

@@ -264,3 +264,14 @@ test("deploy stops at once when Cloud Build returns no build ID", () => {
   assert.match(result.stderr, /no build ID/);
   assert.ok(Date.now() - started < 60_000, "deploy polled instead of stopping");
 });
+
+test("private LLM endpoint: models become the provider map; public hosts get a warning", () => {
+  const base = { ...EXISTING, PRIVATE_LLM_MODELS: "llama-3.3-70b,qwen/qwen3-32b" };
+  const privateRun = runScript(setupSandbox({ ...base, PRIVATE_LLM_BASE_URL: "http://10.128.0.5:8000/v1" }), ["setup", "--dry-run", "--yes"], { STUB_EXISTING: "1" });
+  assert.equal(privateRun.status, 0, privateRun.stderr);
+  assert.doesNotMatch(privateRun.stderr, /is not a private address/);
+  assert.ok(privateRun.stdout.includes('"models":{"llama-3.3-70b":{},"qwen/qwen3-32b":{}}'), privateRun.stdout);
+
+  const publicRun = runScript(setupSandbox({ ...base, PRIVATE_LLM_BASE_URL: "https://llm.example.com/v1" }), ["setup", "--dry-run", "--yes"], { STUB_EXISTING: "1" });
+  assert.match(publicRun.stderr, /llm\.example\.com is not a private address/);
+});

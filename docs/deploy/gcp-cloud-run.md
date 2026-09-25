@@ -43,7 +43,6 @@ Useful options:
 | `--dry-run` | Print the commands that would change things; run only read-only checks |
 | `--yes` | Accept every default (non-interactive) |
 | `--key-file SA.json` | Use a service-account key for this run without changing your gcloud config |
-| `--local-build` | Build with your local docker daemon instead of Cloud Build |
 | `--config FILE` | Use another answers file |
 
 After the first setup:

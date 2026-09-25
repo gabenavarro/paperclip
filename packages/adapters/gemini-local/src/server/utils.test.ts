@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { detectGeminiCredentials, resolveGeminiBillingType } from "./utils.js";
 
 const VERTEX_ENV = {
@@ -34,17 +34,15 @@ describe("detectGeminiCredentials", () => {
   });
 
   it("needs ACPX_AUTH_VERTEX_AI on the server before the ACP engine can use Vertex AI", () => {
+    vi.stubEnv("ACPX_AUTH_VERTEX_AI", "");
     expect(
-      detectGeminiCredentials({ configEnv: {}, hostEnv: VERTEX_ENV, acp: true, serverEnv: {} }),
+      detectGeminiCredentials({ configEnv: {}, hostEnv: VERTEX_ENV, acp: true }),
     ).toEqual({ source: null, vertexNeedsAcpxAuth: true });
+    vi.stubEnv("ACPX_AUTH_VERTEX_AI", "1");
     expect(
-      detectGeminiCredentials({
-        configEnv: {},
-        hostEnv: VERTEX_ENV,
-        acp: true,
-        serverEnv: { ACPX_AUTH_VERTEX_AI: "1" },
-      }).source,
+      detectGeminiCredentials({ configEnv: {}, hostEnv: VERTEX_ENV, acp: true }).source,
     ).toBe("Vertex AI (Application Default Credentials)");
+    vi.unstubAllEnvs();
   });
 
   it("does not count the Vertex flag without a project and location", () => {

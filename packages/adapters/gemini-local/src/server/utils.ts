@@ -25,7 +25,6 @@ export function detectGeminiCredentials(input: {
     configEnv: Record<string, unknown>;
     hostEnv: Record<string, string | undefined> | null;
     acp: boolean;
-    serverEnv?: Record<string, string | undefined>;
 }): { source: string | null; vertexNeedsAcpxAuth: boolean } {
     const read = (key: string) => (nonEmpty(input.configEnv[key]) ? input.configEnv[key] : input.hostEnv?.[key]);
     const vertexConfigured =
@@ -33,7 +32,7 @@ export function detectGeminiCredentials(input: {
         nonEmpty(read("GOOGLE_CLOUD_PROJECT")) &&
         nonEmpty(read("GOOGLE_CLOUD_LOCATION"));
     const vertexNeedsAcpxAuth =
-        vertexConfigured && input.acp && !nonEmpty((input.serverEnv ?? process.env).ACPX_AUTH_VERTEX_AI);
+        vertexConfigured && input.acp && !nonEmpty(process.env.ACPX_AUTH_VERTEX_AI);
 
     let source: string | null = null;
     if (read("GOOGLE_GENAI_USE_GCA") === "true") source = "Google account login (GCA)";

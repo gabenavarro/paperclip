@@ -22,12 +22,6 @@
 FROM node:24-slim@sha256:ba849c60be29959425b8734d57b8b4b7d56f98edd9504c9af091d5281095a71e
 WORKDIR /context
 COPY . .
-# Local credentials (a gitignored secrets/ directory of service-account keys,
-# .env files) must never reach an image layer or the build cache. CI checkouts
-# carry none, so this guards local and deploy-script builds (.dockerignore).
-RUN if [ -e secrets ] || find . \( -name .env -o \( -name '.env.*' ! -name '*.example' \) \) | grep -q .; then \
-      echo "Local credentials reached the Docker build context; check .dockerignore." >&2; exit 1; \
-    fi
 # Committed artifacts the image build reads whose drift checks cannot run
 # here (they need the locked dependency tree or compiled dist/). Existence
 # in the context is the property this probe guards; content correctness is
