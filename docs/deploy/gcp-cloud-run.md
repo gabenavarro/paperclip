@@ -70,7 +70,7 @@ scripts/gcp-cloud-run.sh bootstrap-admin  # print a new first-admin invite URL
 | Deploy | Cloud Build builds `--target production`. Cloud Run deploys the image. | `gcloud builds submit`, `gcloud run deploy` |
 | First admin | A one-off Cloud Run job creates the first-admin invite | `gcloud run jobs deploy --execute-now` |
 
-The build uploads the repository as `gcloud` filters it (`.gitignore` applies). Before uploading, the script checks that no `secrets/` or `.env` file would be included. `.dockerignore` also keeps them out of the image.
+The build uploads `git archive HEAD`, which is exactly the committed tree. Local keys and `.env` files can never be uploaded, and uncommitted changes are not built (the script warns about them). The image tag is the commit, and `deploy` skips the build when that image already exists, so a redeploy that only changes settings takes a minute. `.dockerignore` also keeps credentials out of any image you build from a working directory.
 
 ## Sign in with Google
 

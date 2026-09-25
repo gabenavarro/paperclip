@@ -16,9 +16,6 @@ printf '%s\\n' "$*" >> "$GCLOUD_LOG"
 case "$*" in
   "config get-value account"*) echo "owner@example.com" ;;
   "billing accounts list"*) echo "billingAccounts/000000-AAAAAA-BBBBBB" ;;
-  "meta list-files-for-upload"*)
-    printf 'package.json\\nserver/src/index.ts\\n.env.example\\n'
-    if [ -n "\${STUB_LEAK:-}" ]; then echo "secrets/deploy-key.json"; fi ;;
   "builds get-default-service-account"*) echo "123456789012-compute@developer.gserviceaccount.com" ;;
   "projects describe"*)
     if [ -n "\${STUB_EXISTING:-}" ]; then echo "123456789012"; exit 0; fi
@@ -27,6 +24,9 @@ case "$*" in
     if [ -n "\${STUB_EXISTING:-}" ]; then echo "ERROR: PERMISSION_DENIED: Cloud Billing API has not been used" >&2; exit 1; fi
     echo "ERROR: (gcloud) NOT_FOUND: The resource was not found." >&2; exit 1 ;;
   "sql users describe"*) echo "ERROR: (gcloud.sql.users.describe) HTTPError 404: Not Found." >&2; exit 1 ;;
+  "artifacts docker images describe"*)
+    if [ -n "\${STUB_IMAGE_EXISTS:-}" ]; then echo "image_summary: {}"; exit 0; fi
+    echo "ERROR: (gcloud) NOT_FOUND: image not found" >&2; exit 1 ;;
   *" describe "*|*" list"*|"projects describe"*)
     echo "ERROR: (gcloud) NOT_FOUND: The resource was not found." >&2
     exit 1 ;;
@@ -155,12 +155,27 @@ test("deploy keeps the flags the service depends on", () => {
   assert.match(deployLine, /PAPERCLIP_AUTH_GOOGLE_CLIENT_SECRET=paperclip-google-oauth-client-secret:latest/);
 });
 
-test("deploy refuses to upload a build context that contains local credentials", () => {
+test("deploy builds the committed tree, not the working directory", () => {
   const sandbox = setupSandbox(EXISTING);
-  const result = runScript(sandbox, ["deploy", "--dry-run"], { STUB_LEAK: "1" });
-  assert.notEqual(result.status, 0);
-  assert.match(result.stdout + result.stderr, /secrets\/deploy-key\.json/);
+  const result = runScript(sandbox, ["deploy", "--dry-run"]);
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  // git archive holds only committed files: no local keys, no .env, and no
+  // tracked file dropped by gitignore-style upload filtering.
+  assert.match(result.stdout, /\$ git -C \S+ archive --format=tar\.gz --output=\S+source\.tgz HEAD/);
+  const submit = result.stdout.split("\n").find((line) => line.includes("gcloud builds submit"));
+  assert.ok(submit, result.stdout);
+  assert.match(submit, /gcloud builds submit \S+source\.tgz /);
+  // --async: a deployer who cannot read build logs can still start and poll the build.
+  assert.ok(submit.includes("--async"), submit);
+});
+
+test("deploy skips the build when the image for this commit already exists", () => {
+  const sandbox = setupSandbox(EXISTING);
+  const result = runScript(sandbox, ["deploy", "--dry-run"], { STUB_IMAGE_EXISTS: "1" });
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.match(result.stdout, /already built/);
   assert.doesNotMatch(result.stdout, /gcloud builds submit/);
+  assert.match(result.stdout, /gcloud run deploy paperclip/);
 });
 
 test("without --yes, declining a changing command stops before it runs", () => {

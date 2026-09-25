@@ -193,6 +193,7 @@ choose() { # choose VAR "Question" DEFAULT_INDEX option...
   answer=${answer:-$default}
   case "$answer" in *[!0-9]*|'') answer=$default ;; esac
   [ "$answer" -ge 1 ] && [ "$answer" -le $# ] || answer=$default
+  [ "$YES" = 1 ] && say "  Choice: $answer"
   printf -v "$var" '%s' "$answer"
 }
 
@@ -670,39 +671,37 @@ cmd_setup() {
 
 image_ref() {
   local tag=$IMAGE_TAG
-  if [ -z "$tag" ]; then
-    tag=$(git -C "$REPO_ROOT" rev-parse --short=12 HEAD)
-    if [ -n "$(git -C "$REPO_ROOT" status --porcelain)" ]; then
-      warn "the working tree has uncommitted changes; they are part of this build"
-      tag="$tag-dirty"
-    fi
-  fi
+  [ -n "$tag" ] || tag=$(git -C "$REPO_ROOT" rev-parse --short=12 HEAD)
   printf '%s-docker.pkg.dev/%s/%s/%s:%s' "$REGION" "$PROJECT" "$AR_REPO" "$SERVICE" "$tag"
 }
 
-# Cloud Build uploads the directory filtered by .gcloudignore (or .gitignore when
-# there is none). Refuse to upload local credentials.
-check_upload_context() {
-  local leaked
-  leaked=$(lookup gcloud meta list-files-for-upload "$REPO_ROOT" | grep -E '(^|/)secrets/|(^|/)\.env$|(^|/)\.env\.' | grep -v '\.example$' || true)
-  if [ -n "$leaked" ]; then
-    printf '%s\n' "$leaked" | sed 's/^/  /' >&2
-    die "these local credential files would be uploaded to Cloud Build; add them to .gitignore"
-  fi
-}
-
+# Build from `git archive HEAD`: the upload holds exactly the committed tree. No
+# local keys or .env files can leave the machine, and no tracked file is dropped
+# by gitignore-style upload filtering (gcloud applies .gitignore to tracked files).
 build_image() {
-  local image=$1 commit
-  commit=$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)
+  local image=$1 commit src="$WORK_DIR/source.tgz" build_id status
+  if probe gcloud artifacts docker images describe "$image"; then
+    say "  ✓ $image is already built; skipping the build"
+    return 0
+  fi
+  commit=$(git -C "$REPO_ROOT" rev-parse HEAD)
+  if [ -n "$(git -C "$REPO_ROOT" status --porcelain)" ]; then
+    warn "uncommitted changes are NOT part of this build; it uses the committed tree ($commit)"
+  fi
+  print_cmd git -C "$REPO_ROOT" archive --format=tar.gz --output="$src" HEAD
+  [ "$DRY_RUN" = 1 ] || git -C "$REPO_ROOT" archive --format=tar.gz --output="$src" HEAD
+
   if [ "$LOCAL_BUILD" = 1 ]; then
-    run docker build --target production --build-arg "PAPERCLIP_BUILD_COMMIT=$commit" --tag "$image" "$REPO_ROOT"
-    print_cmd docker login -u oauth2accesstoken --password-stdin "https://$REGION-docker.pkg.dev"
+    print_cmd docker build --target production --build-arg "PAPERCLIP_BUILD_COMMIT=$commit" --tag "$image" - "<" "$src"
     if [ "$DRY_RUN" != 1 ]; then
+      approve || die "stopped before a required step; run the script again when you are ready"
+      docker build --target production --build-arg "PAPERCLIP_BUILD_COMMIT=$commit" --tag "$image" - < "$src"
       gcloud auth print-access-token | docker login -u oauth2accesstoken --password-stdin "https://$REGION-docker.pkg.dev"
     fi
     run docker push "$image"
     return 0
   fi
+
   cat > "$WORK_DIR/cloudbuild.yaml" <<EOF
 steps:
   - name: gcr.io/cloud-builders/docker
@@ -713,10 +712,23 @@ options:
   machineType: E2_HIGHCPU_8
 timeout: 5400s
 EOF
-  say "  Cloud Build takes about 20-40 minutes the first time. Follow it at"
-  say "  https://console.cloud.google.com/cloud-build/builds?project=$PROJECT"
-  # --suppress-logs: waiting for the result needs no permission to stream logs.
-  run gcloud builds submit "$REPO_ROOT" --project="$PROJECT" --config="$WORK_DIR/cloudbuild.yaml" --suppress-logs
+  say "  Cloud Build takes about 20-40 minutes the first time."
+  # --async, then poll: waiting on the build needs cloudbuild.builds.get only,
+  # while a blocking submit also needs permission to read the build logs.
+  print_cmd gcloud builds submit "$src" --project="$PROJECT" --config="$WORK_DIR/cloudbuild.yaml" --async
+  [ "$DRY_RUN" = 1 ] && return 0
+  approve || die "stopped before a required step; run the script again when you are ready"
+  build_id=$(gcloud builds submit "$src" --project="$PROJECT" --config="$WORK_DIR/cloudbuild.yaml" --async --format='value(id)') ||
+    { hint_for gcloud builds submit; die "could not start the build"; }
+  say "  Build $build_id: https://console.cloud.google.com/cloud-build/builds/$build_id?project=$PROJECT"
+  while :; do
+    status=$(lookup gcloud builds describe "$build_id" --project="$PROJECT" --format='value(status)')
+    case "$status" in
+      SUCCESS) say "  ✓ build succeeded"; return 0 ;;
+      FAILURE|INTERNAL_ERROR|TIMEOUT|CANCELLED|EXPIRED) die "build $build_id ended with $status; open the link above for its log" ;;
+    esac
+    sleep 30
+  done
 }
 
 yaml_line() { printf "%s: '%s'\n" "$1" "$(printf '%s' "$2" | sed "s/'/''/g")"; }
@@ -741,7 +753,6 @@ cmd_deploy() {
   url=$(public_url)
   image=$(image_ref)
   say "  Image: $image"
-  check_upload_context
   build_image "$image"
 
   env_file="$WORK_DIR/env.yaml"
