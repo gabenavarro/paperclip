@@ -105,7 +105,9 @@ The service sets these environment variables:
 - `GEMINI_MODEL=gemini-3.8-flash`
 - `GEMINI_CLI_TRUST_WORKSPACE=true`
 
-Gemini CLI agents therefore run on Vertex AI as the runtime service account. Vertex AI usage bills to the project. An agent whose model is `auto` uses `GEMINI_MODEL`, and an agent's own model setting wins. The newest Gemini models are served only from the `global` location. See the [Gemini CLI adapter](../adapters/gemini-local.md#vertex-ai-application-default-credentials).
+Gemini CLI agents therefore run on Vertex AI as the runtime service account. In the onboarding wizard, choose **Gemini** and press **Connect**: no API key and no sign-in. Vertex AI usage bills to the project. An agent whose model is `auto` uses `GEMINI_MODEL`, and an agent's own model setting wins. The newest Gemini models are served only from the `global` location. See the [Gemini CLI adapter](../adapters/gemini-local.md#vertex-ai-application-default-credentials).
+
+The service also sets `PAPERCLIP_LOCAL_AI_LOGIN_ENABLED=false`. A Cloud Run service has no terminal, so the wizard does not offer the subscription sign-in that runs `claude auth login` on the server. Claude and OpenAI connect with an API key.
 
 ## Private OpenAI-compatible endpoints
 

@@ -726,6 +726,8 @@ cmd_deploy() {
     yaml_line PAPERCLIP_MIGRATION_AUTO_APPLY true
     yaml_line PAPERCLIP_DB_BACKUP_ENABLED false
     yaml_line PAPERCLIP_TRUSTED_MCP_RUNTIME_HOST cloud-run
+    # No terminal to run "claude auth login" in; Gemini uses Vertex AI below.
+    yaml_line PAPERCLIP_LOCAL_AI_LOGIN_ENABLED false
     [ "$GOOGLE_AUTH" = yes ] && yaml_line PAPERCLIP_AUTH_DISABLE_SIGN_UP true
     [ -n "$ALLOWED_DOMAINS" ] && yaml_line PAPERCLIP_AUTH_ALLOWED_EMAIL_DOMAINS "$ALLOWED_DOMAINS"
     [ -n "$ALLOWED_EMAILS" ] && yaml_line PAPERCLIP_AUTH_ALLOWED_EMAILS "$ALLOWED_EMAILS"
