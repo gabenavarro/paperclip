@@ -23,11 +23,18 @@ async function main() {
   const configPath = readArg("--config");
   const baseUrl = readArg("--base-url");
 
-  if (!configPath || !baseUrl) {
-    throw new Error("Usage: tsx create-auth-bootstrap-invite.ts --config <path> --base-url <url>");
+  // Without --config, DATABASE_URL names an external Postgres (for example in a
+  // Cloud Run Job, which has no Paperclip config file).
+  const envDatabaseUrl = configPath ? undefined : process.env.DATABASE_URL?.trim();
+  if (!baseUrl || (!configPath && !envDatabaseUrl)) {
+    throw new Error(
+      "Usage: tsx create-auth-bootstrap-invite.ts (--config <path> | DATABASE_URL=<url>) --base-url <url>",
+    );
   }
 
-  const config = JSON.parse(readFileSync(path.resolve(configPath), "utf8")) as {
+  const config = (envDatabaseUrl
+    ? { database: { mode: "postgres", connectionString: envDatabaseUrl } }
+    : JSON.parse(readFileSync(path.resolve(configPath!), "utf8"))) as {
     database?: {
       mode?: string;
       embeddedPostgresPort?: number;
