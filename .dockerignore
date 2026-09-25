@@ -8,6 +8,12 @@ coverage
 data
 tmp
 *.log
+# Local credentials (service-account keys, .env files) must never reach an
+# image layer or the build cache. Committed *.example templates stay.
+secrets
+**/.env
+**/.env.*
+!**/.env*.example
 packages/paperclip-runner/dist
 packages/paperclip-runner/runner/target
 packages/paperclip-runner/devtools
