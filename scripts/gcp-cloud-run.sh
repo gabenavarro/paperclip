@@ -17,6 +17,8 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# gcloud must never wait on a hidden prompt; this script asks the questions.
+export CLOUDSDK_CORE_DISABLE_PROMPTS=1
 CONFIG_FILE="$REPO_ROOT/secrets/cloud-run.env"
 YES=0
 DRY_RUN=0
@@ -28,6 +30,7 @@ STEPS=17
 CONFIG_KEYS="PROJECT PROJECT_NUMBER BILLING_ACCOUNT REGION SERVICE AR_REPO IMAGE_TAG RUNTIME_SA NETWORK SUBNET DB_MODE SQL_INSTANCE DB_NAME DB_USER BUCKET GOOGLE_AUTH ALLOWED_DOMAINS ALLOWED_EMAILS GEMINI_MODEL GEMINI_LOCATION PRIVATE_LLM_BASE_URL PRIVATE_LLM_MODELS PRIVATE_LLM_KEY_SECRET CPU MEMORY MIN_INSTANCES"
 for key in $CONFIG_KEYS; do printf -v "$key" '%s' ""; done
 ACCOUNT=""
+PROJECT_CREATED=0
 INVITE_URL=""
 WORK_DIR=""
 
@@ -128,8 +131,8 @@ run_secret() {
 probe() {
   local err
   if err=$("$@" 2>&1 >/dev/null </dev/null); then return 0; fi
-  case "$err" in
-    *NOT_FOUND*|*"not found"*|*"does not exist"*) return 1 ;;
+  case "$(printf '%s' "$err" | tr '[:upper:]' '[:lower:]')" in
+    *not_found*|*"not found"*|*"does not exist"*) return 1 ;;
   esac
   PROBE_ERROR=$(printf '%s' "$err" | head -n 1)
   return 2
@@ -294,13 +297,21 @@ step_project() {
   else
     say "  Project $PROJECT does not exist yet; it will be created."
     run gcloud projects create "$PROJECT" --name="Paperclip"
+    PROJECT_CREATED=1
   fi
   resolve_project_number
   [ -n "$PROJECT_NUMBER" ] || say "  (the project number is known after the project exists; the public URL uses it)"
 
-  if [ "$(lookup gcloud billing projects describe "$PROJECT" --format='value(billingEnabled)')" = "True" ]; then
-    say "  ✓ billing is enabled"
-    return 0
+  if [ "$PROJECT_CREATED" = 0 ]; then
+    local billing
+    if ! billing=$(gcloud billing projects describe "$PROJECT" --format='value(billingEnabled)' 2>/dev/null </dev/null); then
+      warn "cannot read the billing status of $PROJECT (needs the Cloud Billing API and billing viewer access); assuming billing is enabled"
+      return 0
+    fi
+    if [ "$billing" = "True" ]; then
+      say "  ✓ billing is enabled"
+      return 0
+    fi
   fi
   say "  Cloud Run, Cloud SQL and Vertex AI need a billing account linked to the project."
   local accounts count
@@ -702,7 +713,10 @@ options:
   machineType: E2_HIGHCPU_8
 timeout: 5400s
 EOF
-  run gcloud builds submit "$REPO_ROOT" --project="$PROJECT" --config="$WORK_DIR/cloudbuild.yaml"
+  say "  Cloud Build takes about 20-40 minutes the first time. Follow it at"
+  say "  https://console.cloud.google.com/cloud-build/builds?project=$PROJECT"
+  # --suppress-logs: waiting for the result needs no permission to stream logs.
+  run gcloud builds submit "$REPO_ROOT" --project="$PROJECT" --config="$WORK_DIR/cloudbuild.yaml" --suppress-logs
 }
 
 yaml_line() { printf "%s: '%s'\n" "$1" "$(printf '%s' "$2" | sed "s/'/''/g")"; }

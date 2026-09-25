@@ -20,6 +20,13 @@ case "$*" in
     printf 'package.json\\nserver/src/index.ts\\n.env.example\\n'
     if [ -n "\${STUB_LEAK:-}" ]; then echo "secrets/deploy-key.json"; fi ;;
   "builds get-default-service-account"*) echo "123456789012-compute@developer.gserviceaccount.com" ;;
+  "projects describe"*)
+    if [ -n "\${STUB_EXISTING:-}" ]; then echo "123456789012"; exit 0; fi
+    echo "ERROR: (gcloud) NOT_FOUND: The resource was not found." >&2; exit 1 ;;
+  "billing projects describe"*)
+    if [ -n "\${STUB_EXISTING:-}" ]; then echo "ERROR: PERMISSION_DENIED: Cloud Billing API has not been used" >&2; exit 1; fi
+    echo "ERROR: (gcloud) NOT_FOUND: The resource was not found." >&2; exit 1 ;;
+  "sql users describe"*) echo "ERROR: (gcloud.sql.users.describe) HTTPError 404: Not Found." >&2; exit 1 ;;
   *" describe "*|*" list"*|"projects describe"*)
     echo "ERROR: (gcloud) NOT_FOUND: The resource was not found." >&2
     exit 1 ;;
@@ -168,4 +175,20 @@ test("without --yes, declining a changing command stops before it runs", () => {
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /stopped before a required step/);
   assert.doesNotMatch(readFileSync(sandbox.log, "utf8"), /builds submit/);
+});
+
+test("setup on an existing project keeps going when billing status cannot be read", () => {
+  const sandbox = setupSandbox({
+    PROJECT: "pc-existing",
+    REGION: "us-central1",
+    IMAGE_TAG: "test",
+    ALLOWED_EMAILS: "owner@example.com",
+  });
+  const result = runScript(sandbox, ["setup", "--dry-run", "--yes"], { STUB_EXISTING: "1" });
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.doesNotMatch(result.stdout, /gcloud projects create/);
+  assert.doesNotMatch(result.stdout, /gcloud billing projects link/);
+  assert.match(result.stderr, /cannot read the billing status/);
+  // "HTTPError 404: Not Found" (Cloud SQL) counts as missing, so the user is created.
+  assert.match(result.stdout, /gcloud sql users create paperclip/);
 });
