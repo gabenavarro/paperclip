@@ -30,9 +30,11 @@ case "$*" in
     if [ -n "\${STUB_EXISTING:-}" ]; then echo "ERROR: PERMISSION_DENIED: Cloud Billing API has not been used" >&2; exit 1; fi
     echo "ERROR: (gcloud) NOT_FOUND: The resource was not found." >&2; exit 1 ;;
   "sql users describe"*) echo "ERROR: (gcloud.sql.users.describe) HTTPError 404: Not Found." >&2; exit 1 ;;
+  # images describe also reads Container Analysis, which a registry-only deployer cannot.
   "artifacts docker images describe"*)
-    if [ -n "\${STUB_IMAGE_EXISTS:-}" ]; then echo "image_summary: {}"; exit 0; fi
-    echo "ERROR: (gcloud) NOT_FOUND: image not found" >&2; exit 1 ;;
+    echo "ERROR: Permission 'containeranalysis.occurrences.list' denied" >&2; exit 1 ;;
+  "artifacts docker tags list"*)
+    if [ -n "\${STUB_IMAGE_EXISTS:-}" ]; then printf 'older-tag\\ntest\\n'; fi ;;
   *" describe "*|*" list"*|"projects describe"*)
     echo "ERROR: (gcloud) NOT_FOUND: The resource was not found." >&2
     exit 1 ;;
@@ -252,4 +254,13 @@ printf '403'
   const result = runScript(sandbox, ["deploy", "--yes"], { STUB_IMAGE_EXISTS: "1" });
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
   assert.match(result.stderr, /iam\.allowedPolicyMemberDomains/);
+});
+
+test("deploy stops at once when Cloud Build returns no build ID", () => {
+  const sandbox = setupSandbox(EXISTING);
+  const started = Date.now();
+  const result = runScript(sandbox, ["deploy", "--yes"]);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /no build ID/);
+  assert.ok(Date.now() - started < 60_000, "deploy polled instead of stopping");
 });

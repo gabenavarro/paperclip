@@ -684,7 +684,9 @@ image_ref() {
 # by gitignore-style upload filtering (gcloud applies .gitignore to tracked files).
 build_image() {
   local image=$1 commit src="$WORK_DIR/source.tgz" build_id status
-  if probe gcloud artifacts docker images describe "$image"; then
+  # `tags list` needs registry read access only; `images describe` also reads
+  # Container Analysis, which a deploy account may not have.
+  if lookup gcloud artifacts docker tags list "${image%:*}" --format='value(tag)' | grep -qxF "${image##*:}"; then
     say "  ✓ $image is already built; skipping the build"
     return 0
   fi
@@ -724,6 +726,7 @@ EOF
   approve || die "stopped before a required step; run the script again when you are ready"
   build_id=$(gcloud builds submit "$src" --project="$PROJECT" --config="$WORK_DIR/cloudbuild.yaml" --async --format='value(id)') ||
     { hint_for gcloud builds submit; die "could not start the build"; }
+  [ -n "$build_id" ] || die "Cloud Build returned no build ID; check https://console.cloud.google.com/cloud-build/builds?project=$PROJECT"
   say "  Build $build_id: https://console.cloud.google.com/cloud-build/builds/$build_id?project=$PROJECT"
   local waited=0 misses=0
   while :; do
