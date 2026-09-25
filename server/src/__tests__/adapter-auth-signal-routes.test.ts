@@ -350,6 +350,46 @@ describe("adapter auth-signal route", () => {
     expect(res.body).toEqual({ status: "absent" });
   });
 
+  describe("gemini_local", () => {
+    // Hosted servers (Cloud Run) hold Gemini through Vertex AI and the
+    // runtime service account: env vars only, no login and no key.
+    beforeEach(() => {
+      for (const key of ["GOOGLE_GENAI_USE_GCA", "GEMINI_API_KEY", "GOOGLE_API_KEY"]) vi.stubEnv(key, "");
+      vi.stubEnv("GOOGLE_GENAI_USE_VERTEXAI", "true");
+      vi.stubEnv("GOOGLE_CLOUD_PROJECT", "demo-project");
+      vi.stubEnv("GOOGLE_CLOUD_LOCATION", "global");
+      vi.stubEnv("ACPX_AUTH_VERTEX_AI", "1");
+    });
+    afterEach(() => vi.unstubAllEnvs());
+
+    it("returns present when the server env holds Vertex AI credentials", async () => {
+      const app = await createApp();
+
+      const res = await request(app).get(authSignalPath(COMPANY_1, "gemini_local"));
+
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(res.body).toEqual({ status: "present" });
+    });
+
+    it("returns unknown, never absent, when the server env holds no Gemini credentials", async () => {
+      // A `gemini auth login` file on the host is invisible to this read.
+      vi.stubEnv("GOOGLE_GENAI_USE_VERTEXAI", "");
+      const app = await createApp();
+
+      const res = await request(app).get(authSignalPath(COMPANY_1, "gemini_local"));
+
+      expect(res.body).toEqual({ status: "unknown" });
+    });
+
+    it("returns unknown on a sandbox environment, which does not inherit the server env", async () => {
+      const app = await createApp();
+
+      const res = await request(app).get(authSignalPath(COMPANY_1, "gemini_local", ENVIRONMENT_1));
+
+      expect(res.body).toEqual({ status: "unknown" });
+    });
+  });
+
   it("returns unknown for an adapter type that has no cheap signal", async () => {
     const app = await createApp();
 

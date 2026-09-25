@@ -102,6 +102,7 @@ import type {
   AdapterEnvironmentTestResult,
 } from "@paperclipai/adapter-utils";
 import { evaluateCodexCredentialReadiness } from "@paperclipai/adapter-codex-local/server";
+import { detectGeminiCredentials } from "@paperclipai/adapter-gemini-local/server";
 import type { AdapterAuthSignal, AdapterAuthSignalResponse, CodexAccountBindingClaim } from "@paperclipai/shared";
 import { getDisabledAdapterTypes } from "../services/adapter-plugin-store.js";
 import { skillVersionSelectionMap } from "../services/runtime-skill-selections.js";
@@ -3690,6 +3691,15 @@ export function agentRoutes(
           status = await evaluateClaudeAuthSignal(req, companyId, environmentId);
         } else if (type === "codex_local") {
           status = await evaluateCodexAuthSignal(req, companyId, environmentId);
+        } else if (type === "gemini_local") {
+          // Server env credentials (Vertex AI or a key) reach local runs only.
+          // A host `gemini auth login` file is not read, so no match is
+          // "unknown", never "absent".
+          const environment = environmentId ? await environmentsSvc.getById(environmentId) : null;
+          const local = !environment || environment.driver === "local";
+          if (local && detectGeminiCredentials({ configEnv: {}, hostEnv: process.env, acp: true }).source) {
+            status = "present";
+          }
         }
       } catch {
         // A failed read is never a claim that the credential is absent. Report

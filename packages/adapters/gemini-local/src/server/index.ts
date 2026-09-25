@@ -3,6 +3,7 @@ export * from "./acp.js";
 export { getConfigSchema } from "./config-schema.js";
 export { listGeminiSkills, syncGeminiSkills } from "./skills.js";
 export { testEnvironment } from "./test.js";
+export { detectGeminiCredentials } from "./utils.js";
 export {
   parseGeminiJsonl,
   isGeminiSessionUnrecoverableError,
