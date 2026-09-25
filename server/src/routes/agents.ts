@@ -3692,12 +3692,9 @@ export function agentRoutes(
         } else if (type === "codex_local") {
           status = await evaluateCodexAuthSignal(req, companyId, environmentId);
         } else if (type === "gemini_local") {
-          // Server env credentials (Vertex AI or a key) reach local runs only.
-          // A host `gemini auth login` file is not read, so no match is
-          // "unknown", never "absent".
+          // Server env credentials reach local runs only; no host login file is read, so no match stays "unknown".
           const environment = environmentId ? await environmentsSvc.getById(environmentId) : null;
-          const local = !environment || environment.driver === "local";
-          if (local && detectGeminiCredentials({ configEnv: {}, hostEnv: process.env, acp: true }).source) {
+          if ((environment?.driver ?? "local") === "local" && detectGeminiCredentials({ configEnv: {}, hostEnv: process.env, acp: true }).source) {
             status = "present";
           }
         }

@@ -1,10 +1,7 @@
 import type { DeploymentMode, DeploymentExposure } from "@paperclipai/shared";
 
-/**
- * Same server-host boundary as local stdio runtimes, unless the operator turns
- * it off: a hosted server (Cloud Run) keeps trusted runtimes but has no
- * terminal for a user to sign in from.
- */
+/** Same server-host boundary as local stdio runtimes. `PAPERCLIP_LOCAL_AI_LOGIN_ENABLED=false`
+ * turns it off (a hosted server has no terminal). */
 export function supportsLocalAiLogin(options: {
   deploymentMode?: DeploymentMode;
   deploymentExposure?: DeploymentExposure;
