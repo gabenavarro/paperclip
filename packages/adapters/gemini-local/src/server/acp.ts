@@ -33,6 +33,7 @@ import {
 } from "@paperclipai/adapter-utils/server-utils";
 import { createWorkspaceRestoreTeardown } from "@paperclipai/adapter-utils/workspace-restore-teardown";
 import { DEFAULT_GEMINI_LOCAL_MODEL } from "../index.js";
+import { detectGeminiCredentials } from "./utils.js";
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const packageRootDir = path.resolve(moduleDir, "../..");
@@ -382,10 +383,6 @@ function summarizeStatus(checks: AdapterEnvironmentCheck[]): AdapterEnvironmentT
   return "pass";
 }
 
-function isNonEmpty(value: unknown): value is string {
-  return typeof value === "string" && value.trim().length > 0;
-}
-
 export async function testGeminiAcpEnvironment(
   ctx: AdapterEnvironmentTestContext,
 ): Promise<AdapterEnvironmentTestResult> {
@@ -455,24 +452,12 @@ export async function testGeminiAcpEnvironment(
   });
 
   const envConfig = parseObject(config.env);
-  const considerHostEnv = !targetIsRemote;
-  const hasGca = envConfig.GOOGLE_GENAI_USE_GCA === "true" || (considerHostEnv && process.env.GOOGLE_GENAI_USE_GCA === "true");
-  const configGeminiApiKey = envConfig.GEMINI_API_KEY;
-  const hostGeminiApiKey = considerHostEnv ? process.env.GEMINI_API_KEY : undefined;
-  const configGoogleApiKey = envConfig.GOOGLE_API_KEY;
-  const hostGoogleApiKey = considerHostEnv ? process.env.GOOGLE_API_KEY : undefined;
-  if (
-    isNonEmpty(configGeminiApiKey) ||
-    isNonEmpty(hostGeminiApiKey) ||
-    isNonEmpty(configGoogleApiKey) ||
-    isNonEmpty(hostGoogleApiKey) ||
-    hasGca
-  ) {
-    const source = hasGca
-      ? "Google account login (GCA)"
-      : isNonEmpty(configGeminiApiKey) || isNonEmpty(configGoogleApiKey)
-        ? "adapter config env"
-        : "server environment";
+  const { source, vertexNeedsAcpxAuth } = detectGeminiCredentials({
+    configEnv: envConfig,
+    hostEnv: targetIsRemote ? null : process.env,
+    acp: true,
+  });
+  if (source) {
     checks.push({
       code: "gemini_acp_credentials_detected",
       level: "info",
@@ -484,7 +469,9 @@ export async function testGeminiAcpEnvironment(
       code: "gemini_acp_credentials_not_detected",
       level: "warn",
       message: "No Gemini ACP credentials were detected.",
-      hint: "Set GEMINI_API_KEY / GOOGLE_API_KEY, enable Google account auth, or run `gemini auth login` before starting a Gemini ACP agent.",
+      hint: vertexNeedsAcpxAuth
+        ? "Vertex AI is configured, but acpx selects it only when the Paperclip server has ACPX_AUTH_VERTEX_AI=1 in its environment. Set it, or use engine \"cli\"."
+        : "Set GEMINI_API_KEY / GOOGLE_API_KEY, enable Google account auth, or run `gemini auth login` before starting a Gemini ACP agent.",
     });
   }
 

@@ -121,6 +121,9 @@ describe("acpx identity split and launch environment", () => {
       AWS_BEARER_TOKEN_BEDROCK: "bedrock-host-secret",
       OPENROUTER_API_KEY: "openrouter-host-secret",
       GOOGLE_GENAI_USE_GCA: "true",
+      GOOGLE_GENAI_USE_VERTEXAI: "true",
+      GOOGLE_CLOUD_PROJECT: "vertex-project",
+      GOOGLE_CLOUD_LOCATION: "global",
       KIMI_MODEL_NAME: "kimi-code/test",
       KIMI_MODEL_API_KEY: "kimi-host-secret",
       KIMI_MODEL_BASE_URL: "https://kimi.example",
@@ -164,6 +167,9 @@ describe("acpx identity split and launch environment", () => {
       LC_ALL: "C.UTF-8",
       HTTPS_PROXY: "https://proxy.example",
       GOOGLE_GENAI_USE_GCA: "true",
+      GOOGLE_GENAI_USE_VERTEXAI: "true",
+      GOOGLE_CLOUD_PROJECT: "vertex-project",
+      GOOGLE_CLOUD_LOCATION: "global",
     });
     expect(projectAcpxInheritedHostEnvironment(inherited, "kimi", true)).toEqual({
       PATH: "/usr/bin",

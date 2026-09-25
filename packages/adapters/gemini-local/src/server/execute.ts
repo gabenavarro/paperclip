@@ -69,6 +69,7 @@ import {
   resolveGeminiExecutionEngineForRun,
 } from "./acp.js";
 import { resolveGeminiSkillsHome } from "./skills.js";
+import { resolveGeminiBillingType } from "./utils.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const executeGeminiAcp = createGeminiAcpExecutor();
@@ -76,12 +77,6 @@ const executeGeminiAcp = createGeminiAcpExecutor();
 function hasNonEmptyEnvValue(env: Record<string, string>, key: string): boolean {
   const raw = env[key];
   return typeof raw === "string" && raw.trim().length > 0;
-}
-
-function resolveGeminiBillingType(env: Record<string, string>): "api" | "subscription" {
-  return hasNonEmptyEnvValue(env, "GEMINI_API_KEY") || hasNonEmptyEnvValue(env, "GOOGLE_API_KEY")
-    ? "api"
-    : "subscription";
 }
 
 function buildGeminiHeadlessEnv(env: Record<string, string>): Record<string, string> {

@@ -616,6 +616,12 @@ const ACPX_INHERITED_PROVIDER_ENV_KEYS: Readonly<Record<string, ReadonlySet<stri
     "GOOGLE_API_KEY",
     "GOOGLE_APPLICATION_CREDENTIALS",
     "GOOGLE_GENAI_USE_GCA",
+    // Vertex AI with Application Default Credentials: acpx selects the
+    // `vertex-ai` ACP auth method from the server's ACPX_AUTH_VERTEX_AI, and
+    // Gemini CLI then needs the project and location in its own environment.
+    "GOOGLE_GENAI_USE_VERTEXAI",
+    "GOOGLE_CLOUD_PROJECT",
+    "GOOGLE_CLOUD_LOCATION",
   ]),
   kimi: new Set([
     "KIMI_API_KEY",

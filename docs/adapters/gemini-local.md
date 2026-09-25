@@ -8,7 +8,20 @@ The `gemini_local` adapter runs Google's Gemini CLI locally. It supports session
 ## Prerequisites
 
 - Gemini CLI installed (`gemini` command available)
-- `GEMINI_API_KEY` or `GOOGLE_API_KEY` set, or local Gemini CLI auth configured
+- `GEMINI_API_KEY` or `GOOGLE_API_KEY` set, Vertex AI configured (see below), or local Gemini CLI auth configured
+
+## Vertex AI (Application Default Credentials)
+
+On Google Cloud (for example Cloud Run with a service account that has `roles/aiplatform.user`), Gemini can run on Vertex AI with no API key and no key file. Set these on the Paperclip server:
+
+| Variable | Value |
+|----------|-------|
+| `GOOGLE_GENAI_USE_VERTEXAI` | `true` |
+| `GOOGLE_CLOUD_PROJECT` | The Google Cloud project that is billed for Vertex AI |
+| `GOOGLE_CLOUD_LOCATION` | A Vertex AI location, for example `global` |
+| `ACPX_AUTH_VERTEX_AI` | `1`. The ACP engine (the default) authenticates only when acpx selects an ACP auth method; this selects `vertex-ai`. The CLI engine does not need it. |
+
+The identity comes from Application Default Credentials: the attached service account on Google Cloud, or `GOOGLE_APPLICATION_CREDENTIALS` / `gcloud auth application-default login` elsewhere. Do not also set `GEMINI_API_KEY` or `GOOGLE_API_KEY` on the server; Gemini CLI can prefer a key over Vertex AI. Use model IDs from Vertex AI, for example `gemini-3.5-flash`.
 
 ## Configuration Fields
 
@@ -41,5 +54,5 @@ Use the "Test Environment" button in the UI to validate the adapter config. It c
 
 - Gemini CLI is installed and accessible
 - Working directory is absolute and available (auto-created if missing and permitted)
-- API key/auth hints (`GEMINI_API_KEY` or `GOOGLE_API_KEY`)
+- API key/auth hints (`GEMINI_API_KEY`, `GOOGLE_API_KEY`, Google account login, or Vertex AI)
 - A live hello probe (`gemini --output-format json "Respond with hello."`) to verify CLI readiness

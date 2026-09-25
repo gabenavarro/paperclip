@@ -22,7 +22,7 @@ import {
 } from "@paperclipai/adapter-utils/execution-target";
 import { DEFAULT_GEMINI_LOCAL_MODEL, SANDBOX_INSTALL_COMMAND } from "../index.js";
 import { detectGeminiAuthRequired, detectGeminiQuotaExhausted, parseGeminiJsonl } from "./parse.js";
-import { firstNonEmptyLine } from "./utils.js";
+import { detectGeminiCredentials, firstNonEmptyLine } from "./utils.js";
 import {
   resolveGeminiExecutionEngineForRun,
   testGeminiAcpEnvironment,
@@ -32,10 +32,6 @@ function summarizeStatus(checks: AdapterEnvironmentCheck[]): AdapterEnvironmentT
   if (checks.some((check) => check.level === "error")) return "fail";
   if (checks.some((check) => check.level === "warn")) return "warn";
   return "pass";
-}
-
-function isNonEmpty(value: unknown): value is string {
-  return typeof value === "string" && value.trim().length > 0;
 }
 
 function commandLooksLike(command: string, expected: string): boolean {
@@ -147,27 +143,16 @@ export async function testEnvironment(
     });
   }
 
-  const configGeminiApiKey = env.GEMINI_API_KEY;
-  const hostGeminiApiKey = targetIsRemote ? undefined : process.env.GEMINI_API_KEY;
-  const configGoogleApiKey = env.GOOGLE_API_KEY;
-  const hostGoogleApiKey = targetIsRemote ? undefined : process.env.GOOGLE_API_KEY;
-  const hasGca = env.GOOGLE_GENAI_USE_GCA === "true" || (!targetIsRemote && process.env.GOOGLE_GENAI_USE_GCA === "true");
-  if (
-    isNonEmpty(configGeminiApiKey) ||
-    isNonEmpty(hostGeminiApiKey) ||
-    isNonEmpty(configGoogleApiKey) ||
-    isNonEmpty(hostGoogleApiKey) ||
-    hasGca
-  ) {
-    const source = hasGca
-      ? "Google account login (GCA)"
-      : isNonEmpty(configGeminiApiKey) || isNonEmpty(configGoogleApiKey)
-        ? "adapter config env"
-        : "server environment";
+  const { source } = detectGeminiCredentials({
+    configEnv: env,
+    hostEnv: targetIsRemote ? null : process.env,
+    acp: false,
+  });
+  if (source) {
     checks.push({
       code: "gemini_api_key_present",
       level: "info",
-      message: "Gemini API credentials are set for CLI authentication.",
+      message: "Gemini credentials are set for CLI authentication.",
       detail: `Detected in ${source}.`,
     });
   } else {
