@@ -6182,4 +6182,26 @@ describe("doc/hpc company package", () => {
     expect(preview.warnings).toEqual([]);
     expect(preview.manifest.projects.map((project) => project.slug)).toEqual(["hpc"]);
   });
+
+  it("ships the three skills with the hpc-jobs and hpc-ml-images scripts", async () => {
+    const preview = await previewPackage();
+    const skills = Object.fromEntries(preview.manifest.skills.map((skill) => [skill.slug, skill]));
+
+    expect(Object.keys(skills).sort()).toEqual(["hpc-jobs", "hpc-ml-images", "hpc-nf-core"]);
+    const scripts = (slug: string) =>
+      skills[slug].fileInventory
+        .filter((file) => file.kind === "script")
+        .map((file) => path.posix.basename(file.path))
+        .sort();
+    expect(scripts("hpc-jobs")).toEqual([
+      "hpc-diagnose.sh",
+      "hpc-doctor.sh",
+      "hpc-report-gpu-hours.sh",
+      "hpc-status.sh",
+      "hpc-submit.sh",
+      "lib.sh",
+    ]);
+    expect(scripts("hpc-ml-images")).toEqual(["hpc-build-image.sh"]);
+    expect(preview.errors).toEqual([]);
+  });
 });
