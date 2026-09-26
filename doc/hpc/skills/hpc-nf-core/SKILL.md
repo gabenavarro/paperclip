@@ -11,19 +11,23 @@ tags:
 
 Pipelines run with open-source Nextflow. Tasks run on Slurm in Apptainer containers. The box's settings are in `/etc/paperclip-hpc/nextflow.config`: the Slurm executor, Apptainer, a shared image cache, and a `gpu` label.
 
+The scripts named here are in the hpc-jobs skill's `scripts/` folder.
+
 ## Run a pipeline
 
 1. Create `/data/jobs/<issue>/<run>/`, and write the samplesheet and any params file there.
 2. Pin the release. Find it on nf-co.re and never run an unpinned pipeline.
-3. Submit the Nextflow head job with the hpc-jobs skill, so it survives your heartbeat:
+3. Submit the Nextflow head job with the hpc-jobs skill's submit script, so it survives your heartbeat:
 
 ```bash
-bash scripts/hpc-submit.sh --job /data/jobs/<issue>/<run> --gpus 0 --cpus 2 --mem 8G --time 4320 -- \
+bash <hpc-jobs skill directory>/scripts/hpc-submit.sh --job /data/jobs/<issue>/<run> --gpus 0 --cpus 2 --mem 8G --time 1440 -- \
   nextflow run nf-core/<name> -r <release> -profile apptainer -c /etc/paperclip-hpc/nextflow.config \
   --input samplesheet.csv --outdir outputs -work-dir work -resume -with-trace -with-report
 ```
 
 There is no `--image`: the head job runs on the host from the run directory, because it must call `sbatch` itself. It needs no GPU. Processes that need one get it from the `gpu` label in the config.
+
+The hpc-jobs limits apply to the head job too: a pipeline that needs more than 24 h needs board approval first. If the head job reaches its time limit, submit the same command again. `-resume` reuses the finished tasks.
 
 ## Check and finish
 
@@ -35,7 +39,7 @@ There is no `--image`: the head job runs on the host from the run directory, bec
 
 ## Failures
 
-- Run `bash scripts/hpc-diagnose.sh <jobid> /data/jobs/<issue>/<run>`. For a failed process, read `.command.err` in the work directory it names.
+- Run `bash <hpc-jobs skill directory>/scripts/hpc-diagnose.sh <jobid> /data/jobs/<issue>/<run>`. For a failed process, read `.command.err` in the work directory it names.
 - Fix the input or the params, then resubmit the same command. `-resume` reuses finished tasks.
 
 ## Clean up

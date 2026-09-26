@@ -21,7 +21,7 @@ As an administrator on the box (Ubuntu 24.04):
      - a partition with `DefaultTime=04:00:00` and `MaxTime=7-00:00:00`
    - `gres.conf`: `AutoDetect=nvml`.
    - `cgroup.conf`: `ConstrainCores=yes`, `ConstrainRAMSpace=yes`, `ConstrainDevices=yes`.
-4. Install Apptainer, and rootless Podman with subuid/subgid ranges for `paperclip`.
+4. Install Apptainer, and rootless Podman with subuid/subgid ranges for `paperclip`. Put Podman's storage on `/data` (`graphroot` in `~paperclip/.config/containers/storage.conf`), because ML images are large.
 5. Install Java 17, Nextflow, Node.js 22, git, curl, jq and the Claude Code CLI for the `paperclip` user.
 6. Create `/data/jobs` (writable), `/data/refs` (read-only in jobs), `/data/images` and `/data/cache/apptainer`.
 7. Write `/etc/paperclip-hpc/nextflow.config`:
@@ -65,4 +65,4 @@ After the import:
 
 1. Set each HPC agent's default environment to the SSH environment (the agent's settings, or `PATCH /api/agents/:id` with `defaultEnvironmentId`).
 2. To skip digests on quiet days, set the daily digest routine to run only after activity: `PATCH /api/routines/:id` with `{"activityGatePolicy":"require_external_activity"}`.
-3. Give one agent a small issue: "Run `bash scripts/hpc-doctor.sh` and report." Every line should be PASS.
+3. Give one agent a small issue: "Run the hpc-jobs skill's `scripts/hpc-doctor.sh` and report." Every line should be PASS.

@@ -11,6 +11,8 @@ tags:
 
 You work on the HPC head node through Paperclip's ssh environment. Heavy work never runs in your own shell: submit it to Slurm, which gives each job its own CPUs, memory and GPUs.
 
+The scripts named here are in this skill's `scripts/` folder. Run them from this skill's base directory, or give their full path.
+
 ## Rules
 
 - **Where data goes.** Each job lives in `/data/jobs/<issue>/<job>/`, with `code/`, `inputs/`, `outputs/`, `logs/`, `work/` and `tmp/`.
@@ -28,6 +30,7 @@ bash scripts/hpc-submit.sh --job /data/jobs/<issue>/<job> --image <sif> [--gpus 
 ```
 
 - **Inside the container:** the job directory is `/work`, and reference data is `/refs`. The container starts with a clean environment, so keep configuration in files under `/work`.
+  - Link large inputs into `inputs/` with absolute paths under `/data/jobs` or `/data/refs`. The container sees both, read-only, at the same paths.
 - **Without `--image`:** the command runs on the host from the job directory. Use this only for a Nextflow head job (see the hpc-nf-core skill).
 - **What the script does:**
   - checks the job with `sbatch --test-only`;

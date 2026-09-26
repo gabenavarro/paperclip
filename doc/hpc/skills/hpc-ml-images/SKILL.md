@@ -11,6 +11,8 @@ tags:
 
 Images are Dockerfiles, built with rootless Podman and stored as pinned Apptainer images: `/data/images/<name>/<tag>-<sha12>.sif`. Jobs use that exact path. Never use a moving tag.
 
+`scripts/hpc-build-image.sh` is in this skill's folder. The GPU check uses `scripts/hpc-submit.sh` from the hpc-jobs skill's folder.
+
 ## Before a CUDA or PyTorch change
 
 1. Read the host: `nvidia-smi --query-gpu=name,driver_version,compute_cap --format=csv,noheader`.
@@ -35,10 +37,10 @@ It prints `image: /data/images/<name>/<tag>-<sha12>.sif`. Building needs no GPU.
 
 ## Check it on the GPU
 
-Submit a short test job with the hpc-jobs skill:
+Submit a short test job with the hpc-jobs skill's submit script:
 
 ```bash
-bash scripts/hpc-submit.sh --job /data/jobs/<issue>/image-check --image <sif> --time 10 -- python -c "import torch; print(torch.cuda.get_arch_list(), torch.cuda.is_available())"
+bash <hpc-jobs skill directory>/scripts/hpc-submit.sh --job /data/jobs/<issue>/image-check --image <sif> --time 10 -- python -c "import torch; print(torch.cuda.get_arch_list(), torch.cuda.is_available())"
 ```
 
 The arch list must include the GPU's `sm_XY`. Put the image path, its labels and the check result in an issue comment.

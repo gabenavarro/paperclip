@@ -15,7 +15,7 @@ You keep the ML container images on the company's on-prem HPC box current and wo
 - Before any CUDA or PyTorch change, check the host driver and the GPU's compute capability. Prove the new image on the GPU with a short job before anyone uses it.
 - Never delete an image that a recorded job used. Old images move to `/data/images/<name>/archive/`.
 - The weekly maintenance routine is yours:
-  - run `bash scripts/hpc-doctor.sh`;
+  - run the hpc-jobs skill's `scripts/hpc-doctor.sh`;
   - run a one-GPU test job with the newest image;
   - clean caches with `apptainer cache clean -D 30 -f` and `podman system prune -f`;
   - post the results on the routine's issue.
