@@ -9,7 +9,7 @@ tags:
 
 # nf-core on the HPC box
 
-Pipelines run with open-source Nextflow. Tasks run on Slurm in Apptainer containers. The box's settings are in `/etc/paperclip-hpc/nextflow.config`: the Slurm executor, Apptainer, a shared image cache, and a `gpu` label.
+Pipelines run with open-source Nextflow. Tasks run on Slurm in Apptainer containers. The box's settings are in `/etc/paperclip-hpc/nextflow.config`: the Slurm executor, Apptainer, a shared image cache, and one GPU for each process with nf-core's `process_gpu` label.
 
 The scripts named here are in the hpc-jobs skill's `scripts/` folder.
 
@@ -25,7 +25,7 @@ bash <hpc-jobs skill directory>/scripts/hpc-submit.sh --job /data/jobs/<issue>/<
   --input samplesheet.csv --outdir outputs -work-dir work -resume -with-trace -with-report
 ```
 
-There is no `--image`: the head job runs on the host from the run directory, because it must call `sbatch` itself. It needs no GPU. Processes that need one get it from the `gpu` label in the config.
+There is no `--image`: the head job runs on the host from the run directory, because it must call `sbatch` itself. It needs no GPU. Processes with the `process_gpu` label get one from the site config. If the pipeline has GPU steps, use `-profile apptainer,gpu`: the `gpu` profile turns on their GPU code path and Apptainer's `--nv`.
 
 The hpc-jobs limits apply to the head job too: a pipeline that needs more than 24 h needs board approval first. If the head job reaches its time limit, submit the same command again. `-resume` reuses the finished tasks.
 

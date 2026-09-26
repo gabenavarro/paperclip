@@ -25,10 +25,21 @@ As an administrator on the box (Ubuntu 24.04):
 5. Install Java 17, Nextflow, Node.js 22, git, curl, jq and the Claude Code CLI for the `paperclip` user.
 6. Create `/data/jobs` (writable), `/data/refs` (read-only in jobs), `/data/images` and `/data/cache/apptainer`.
 7. Write `/etc/paperclip-hpc/nextflow.config`:
-   - `process.executor = 'slurm'`
-   - `apptainer.enabled = true`
-   - `apptainer.cacheDir = '/data/cache/apptainer'`
-   - `withLabel: gpu { clusterOptions = '--gres=gpu:1'; containerOptions = '--nv' }`
+
+   ```groovy
+   process {
+     executor = 'slurm'
+     withLabel: process_gpu {
+       clusterOptions = '--gres=gpu:1'
+     }
+   }
+   apptainer {
+     enabled = true
+     cacheDir = '/data/cache/apptainer'
+   }
+   ```
+
+   nf-core marks GPU steps with the `process_gpu` label. Nextflow's Slurm executor ignores the `accelerator` directive, so the GPU request comes from `clusterOptions`. Run pipelines that have GPU steps with `-profile apptainer,gpu`: the `gpu` profile turns on their GPU code path and Apptainer's `--nv`.
 8. Put the Google credential for Vertex AI in `/etc/paperclip/gcp-credentials.json` (mode `0600`, owned by `paperclip`). Use a Workload Identity Federation config if you have an identity provider. Otherwise use a service-account key with only the Vertex AI User role.
 9. In `/etc/ssh/sshd_config`, set `MaxSessions 64`, then reload sshd. Paperclip sends all of its commands to the box over one shared ssh connection, and the default allows only 10 sessions per connection.
 

@@ -97,7 +97,7 @@ Verify with the unit tests above. Also run `server/src/__tests__/environment-liv
    - `process.executor = 'slurm'`
    - `apptainer.enabled = true`
    - `apptainer.cacheDir = '/data/cache/apptainer'`
-   - a `gpu` label that sets `clusterOptions = '--gres=gpu:1'` and `containerOptions = '--nv'`
+   - `clusterOptions = '--gres=gpu:1'` for processes with nf-core's `process_gpu` label. Nextflow's Slurm executor ignores `accelerator`. Pipelines with GPU steps run with `-profile apptainer,gpu`, which turns on their GPU code path and adds Apptainer's `--nv`.
 6. **Agent runtime.** Node.js 22 or later, git, tar, `curl`, `jq`, and the agent CLIs (`claude`, `gemini`) on the login-profile `PATH`. Pin versions in the environment's env vars: `NXF_VER=<version>`, and `DISABLE_AUTOUPDATER=1` for Claude Code. For Gemini CLI, set `general.enableAutoUpdate` to `false` in its settings, after checking the key against the installed version.
 7. **Directories.**
    - `/data/jobs`: read-write for `paperclip`.
