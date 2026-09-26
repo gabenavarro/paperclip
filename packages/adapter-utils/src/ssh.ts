@@ -414,7 +414,19 @@ async function withTempFile(
 let sshControlDirPath: string | undefined;
 
 async function sshControlDir(): Promise<string> {
-  sshControlDirPath ??= await fs.mkdtemp(path.join(os.tmpdir(), "pc-ssh-"));
+  if (sshControlDirPath) {
+    try {
+      await fs.stat(sshControlDirPath);
+      return sshControlDirPath;
+    } catch {
+      // The directory vanished from under us (e.g. an external cleanup).
+      // ssh fails every later call with "unix_listener: ... No such file or
+      // directory" once its ControlPath directory is gone, so mint a fresh
+      // one instead of memoizing a dead path forever.
+      sshControlDirPath = undefined;
+    }
+  }
+  sshControlDirPath = await fs.mkdtemp(path.join(os.tmpdir(), "pc-ssh-"));
   return sshControlDirPath;
 }
 

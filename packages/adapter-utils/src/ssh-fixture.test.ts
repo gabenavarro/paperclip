@@ -597,6 +597,31 @@ describe("ssh env-lab fixture", () => {
     await expect(runSshCommand(mismatchedConfig, "true", { timeoutMs: 30_000 })).rejects.toThrow();
   }, SSH_FIXTURE_TEST_TIMEOUT_MS);
 
+  it("recovers when the ssh control-socket directory is removed out from under it", async () => {
+    const rootDir = await createFixtureRootDir();
+    const statePath = path.join(rootDir, "state.json");
+    const started = await startSshEnvLabFixtureOrSkip(statePath, "SSH control-dir recovery test");
+    if (!started) return;
+    const config = await buildSshEnvLabFixtureConfig(started);
+
+    await runSshCommand(config, "true", { timeoutMs: 30_000 });
+
+    const target = await buildSshSpawnTarget({
+      spec: { ...config, remoteCwd: started.workspaceDir },
+      command: "true",
+      args: [],
+      env: {},
+    });
+    const controlPathArg = target.args.find((arg) => arg.startsWith("ControlPath="));
+    expect(controlPathArg).toBeDefined();
+    const controlDir = path.dirname(controlPathArg!.slice("ControlPath=".length));
+    await target.cleanup();
+
+    await rm(controlDir, { recursive: true, force: true });
+
+    await expect(runSshCommand(config, "true", { timeoutMs: 30_000 })).resolves.toBeDefined();
+  }, SSH_FIXTURE_TEST_TIMEOUT_MS);
+
   it("builds a remote script that sources login profiles but no nvm", async () => {
     const target = await buildSshSpawnTarget({
       spec: {
