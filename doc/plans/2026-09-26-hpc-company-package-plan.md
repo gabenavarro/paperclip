@@ -23,6 +23,7 @@
   - Never set `metadata.sources` in a `SKILL.md`, or scripts are rejected.
   - `agents/<slug>/AGENTS.md` is the exact filename.
 - Scripts in imported skills lose the exec bit. Skills call them as `bash scripts/<name>.sh`.
+- Paperclip deletes the per-run remote workspace after each run. Jobs start in their job directory (`sbatch --chdir`), never in the workspace.
 - Import from GitHub, never a local folder: local imports drop the scripts. Always pass `--include agents,projects,tasks,skills`, because including `company` would clear the company logo.
 - The repo is public. Write no internal hostnames, project IDs or IPs. Only `gabenavarro` merges. Commits end with the Claude Code attribution trailer.
 
@@ -277,6 +278,7 @@ test("hpc-submit validates, submits, and merges the monitor into the issue polic
   const calls = readFileSync(s.log, "utf8");
   assert.match(calls, /sbatch .*--test-only/);
   assert.match(calls, /sbatch .*--parsable .*--gres gpu:1/);
+  assert.match(calls, /sbatch .*--parsable .*--chdir \S+\/ISS-1\/train /, "the job must start in its job directory, not the workspace");
   const script = readdirSync(path.join(job, "logs")).find((file) => file.endsWith(".sbatch"));
   const body = readFileSync(path.join(job, "logs", script), "utf8");
   assert.match(body, /apptainer exec --nv --containall/);
@@ -466,7 +468,9 @@ script="$job/logs/submit-$(date -u +%Y%m%dT%H%M%SZ).sbatch"
   fi
 } >"$script"
 
-args=(--job-name "$(basename "$job")" --cpus-per-task "$cpus" --mem "$mem" --time "$time"
+# --chdir: Slurm otherwise starts the job in the submit directory, the per-run
+# workspace, which Paperclip deletes after the run.
+args=(--job-name "$(basename "$job")" --chdir "$job" --cpus-per-task "$cpus" --mem "$mem" --time "$time"
   --output "$job/logs/%j.out")
 [[ "$gpus" -gt 0 ]] && args+=(--gres "gpu:$gpus")
 [[ $checkpoint -eq 1 ]] && args+=(--signal "B:USR1@300" --requeue)
@@ -979,7 +983,7 @@ You work on the HPC head node through Paperclip's ssh environment. Heavy work ne
 ## Rules
 
 - **Where data goes.** Each job lives in `/data/jobs/<issue>/<job>/`, with `code/`, `inputs/`, `outputs/`, `logs/`, `work/` and `tmp/`.
-  - Never put data, outputs or a Nextflow `work/` directory in your Paperclip workspace. The workspace is copied back to the Paperclip server's memory after every run.
+  - Never put data, outputs or a Nextflow `work/` directory in your Paperclip workspace. The workspace is copied back to the Paperclip server's memory after every run, then deleted from the box.
   - Reference data in `/data/refs` is read-only.
 - **Images.** Use a pinned `.sif` path from `/data/images/<name>/<tag>-<sha12>.sif` (see the hpc-ml-images skill).
 - **Limits.** The defaults are 16 CPUs, 64 GB, 1 GPU and 24 h.
@@ -1323,10 +1327,12 @@ As an administrator on the box (Ubuntu 24.04):
    - `apptainer.cacheDir = '/data/cache/apptainer'`
    - `withLabel: gpu { clusterOptions = '--gres=gpu:1'; containerOptions = '--nv' }`
 8. Put the Google credential for Vertex AI in `/etc/paperclip/gcp-credentials.json` (mode `0600`, owned by `paperclip`). Use a Workload Identity Federation config if you have an identity provider. Otherwise use a service-account key with only the Vertex AI User role.
+9. In `/etc/ssh/sshd_config`, set `MaxSessions 64`, then reload sshd. Paperclip sends all of its commands to the box over one shared ssh connection, and the default allows only 10 sessions per connection.
 
 ## 2. Connect Paperclip
 
 1. Route the Cloud Run VPC to the site (HA VPN or Interconnect). Allow TCP 22 from the Cloud Run subnet only.
+   - Paperclip's ssh sends a keepalive every 15 s and closes the connection after about 60 s with no reply. A VPN outage longer than a minute fails every run on the box.
 2. In Paperclip, turn on **Instance Settings → Experimental → Environments**.
 3. Create an **SSH** environment:
    - host, and user `paperclip`
