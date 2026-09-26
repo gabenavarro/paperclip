@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Shared helpers for the hpc-jobs scripts. Source it: . "$(dirname "$0")/lib.sh"
 HPC_JOBS_ROOT="${HPC_JOBS_ROOT:-/data/jobs}"
 HPC_REFS_ROOT="${HPC_REFS_ROOT:-/data/refs}"

@@ -6,7 +6,7 @@ set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 
 [[ $# -eq 2 ]] || die "usage: hpc-report-gpu-hours.sh JOBID JOB_DIR"
-id="$1" job="$2" marker="$2/logs/$1.cost-reported"
+id="$1" marker="$2/logs/$1.cost-reported"
 if [[ -f "$marker" ]]; then printf 'already reported job %s\n' "$id"; exit 0; fi
 line=$(grep -m1 "JobId=$id " "$HPC_JOBCOMP_LOG" 2>/dev/null) || die "job $id is not in $HPC_JOBCOMP_LOG yet (still running?)"
 gpus=$(sed -n 's/.*gres\/gpu=\([0-9]*\).*/\1/p' <<<"$(field Tres "$line")")
