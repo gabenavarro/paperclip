@@ -8,6 +8,7 @@ import {
   prepareGitHubOperationLaunchers,
   adapterExecutionTargetUsesManagedHome,
   ensureAdapterExecutionTargetRuntimeCommandInstalled,
+  readAdapterExecutionTargetHomeDir,
   resolveAdapterExecutionTargetCwd,
   runAdapterExecutionTargetProcess,
   runAdapterExecutionTargetShellCommand,
@@ -274,6 +275,38 @@ describe("runAdapterExecutionTargetShellCommand", () => {
         strictHostKeyChecking: true,
       },
     })).toBe(false);
+  });
+});
+
+describe("readAdapterExecutionTargetHomeDir", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const SSH_TARGET = {
+    kind: "remote" as const,
+    transport: "ssh" as const,
+    remoteCwd: "/srv/paperclip/workspace",
+    spec: {
+      host: "ssh.example.test",
+      port: 22,
+      username: "ssh-user",
+      remoteCwd: "/srv/paperclip/workspace",
+      remoteWorkspacePath: "/srv/paperclip/workspace",
+      privateKey: null,
+      knownHosts: null,
+      strictHostKeyChecking: true,
+    },
+  };
+
+  it("throws when the remote home-directory probe times out, instead of resolving null", async () => {
+    vi.spyOn(ssh, "runSshCommand").mockRejectedValue(
+      Object.assign(new Error("Command failed"), { code: null, killed: true, signal: "SIGTERM", stdout: "", stderr: "" }),
+    );
+
+    await expect(
+      readAdapterExecutionTargetHomeDir("run-home", SSH_TARGET, { cwd: "/tmp/local", env: {} }),
+    ).rejects.toThrow("Reading the remote home directory timed out");
   });
 });
 

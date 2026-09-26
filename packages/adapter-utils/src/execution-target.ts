@@ -1145,11 +1145,14 @@ export async function readAdapterExecutionTargetHomeDir(
   target: AdapterExecutionTarget | null | undefined,
   options: AdapterExecutionTargetShellOptions,
 ): Promise<string | null> {
-  const result = await runAdapterExecutionTargetShellCommand(
-    runId,
-    target,
-    'printf %s "$HOME"',
-    options,
+  const result = throwIfShellCommandTimedOut(
+    await runAdapterExecutionTargetShellCommand(
+      runId,
+      target,
+      'printf %s "$HOME"',
+      options,
+    ),
+    "Reading the remote home directory",
   );
   const homeDir = result.stdout.trim();
   return homeDir.length > 0 ? homeDir : null;
