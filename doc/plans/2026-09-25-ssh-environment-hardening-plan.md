@@ -78,23 +78,14 @@ Expected: FAIL with `expected 3 to be less than or equal to 1` (each call logs i
 - [ ] **Step 3: Implement.** In `ssh.ts`, add above `createSshAuthArgs`:
 
 ```ts
-// One private (0700) directory per server process for ssh control sockets.
-// `%C` hashes host, port and user, so each target gets its own master
-// connection and every later command reuses it instead of logging in again.
-let sshControlDirPromise: Promise<string> | null = null;
+// One private directory per server process for ssh control sockets (mkdtemp
+// creates it 0700). `%C` hashes host, port and user, so each target gets one
+// master connection that every later command reuses.
+let sshControlDirPath: string | undefined;
 
-function sshControlDir(): Promise<string> {
-  sshControlDirPromise ??= fs
-    .mkdtemp(path.join(os.tmpdir(), "pc-ssh-"))
-    .then(async (dir) => {
-      await fs.chmod(dir, 0o700);
-      return dir;
-    })
-    .catch((error: unknown) => {
-      sshControlDirPromise = null;
-      throw error;
-    });
-  return sshControlDirPromise;
+async function sshControlDir(): Promise<string> {
+  sshControlDirPath ??= await fs.mkdtemp(path.join(os.tmpdir(), "pc-ssh-"));
+  return sshControlDirPath;
 }
 ```
 
@@ -154,7 +145,7 @@ git commit -m "fix(ssh): reuse one SSH connection per target with ControlMaster"
 **Interfaces:**
 - Consumes: `createSshAuthArgs` (Task 1).
 - Produces:
-  - `export function encodeSshEnvStdin(env: Record<string, string>): string`
+  - `encodeSshEnvStdin(env)`: a function local to `ssh.ts`, not exported.
   - `buildSshSpawnTarget(...)` now returns `{ command: string; args: string[]; stdinPrefix: string; cleanup: () => Promise<void> }`
   - `SpawnTarget` gains `stdinPrefix?: string`.
 
@@ -299,29 +290,24 @@ const LOGIN_PROFILE_SCRIPT = [
 const READ_ENV_FROM_STDIN =
   'while IFS= read -r __pc_l && [ -n "$__pc_l" ]; do __pc_v=$(printf %s "${__pc_l#* }" | base64 -d && printf x) || exit 97; export "${__pc_l%% *}=${__pc_v%x}"; done';
 
-export function encodeSshEnvStdin(env: Record<string, string>): string {
-  const lines = Object.entries(env).map(([key, value]) => {
+function encodeSshEnvStdin(env: Record<string, string | undefined> | undefined): string {
+  const lines = Object.entries(env ?? {}).flatMap(([key, value]) => {
+    if (typeof value !== "string") return [];
     if (!isValidShellEnvKey(key)) {
       throw new Error(`Invalid SSH environment variable key: ${key}`);
     }
-    return `${key} ${Buffer.from(value, "utf8").toString("base64")}\n`;
+    return [`${key} ${Buffer.from(value, "utf8").toString("base64")}\n`];
   });
   return lines.length > 0 ? `${lines.join("")}\n` : "";
 }
 ```
 
-Replace the body of `runSshCommand` (keep the signature and the long comment about profiles):
+Replace the body of `runSshCommand`. Keep the long comment about profiles, and widen `options.env` to `Record<string, string | undefined>` so callers can pass their env as-is:
 
 ```ts
   let cleanup: () => Promise<void> = () => Promise.resolve();
   try {
-    const envStdin = encodeSshEnvStdin(
-      Object.fromEntries(
-        Object.entries(options.env ?? {}).filter(
-          (entry): entry is [string, string] => typeof entry[1] === "string",
-        ),
-      ),
-    );
+    const envStdin = encodeSshEnvStdin(options.env);
     const auth = await createSshAuthArgs(config);
     cleanup = auth.cleanup;
     const remoteScript = [
@@ -355,11 +341,7 @@ Replace the body of `runSshCommand` (keep the signature and the long comment abo
 Replace the body of `buildSshSpawnTarget` and add `stdinPrefix: string` to its return type:
 
 ```ts
-  const stdinPrefix = encodeSshEnvStdin(
-    Object.fromEntries(
-      Object.entries(input.env).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
-    ),
-  );
+  const stdinPrefix = encodeSshEnvStdin(input.env);
   const auth = await createSshAuthArgs(input.spec);
   const remoteCommandParts = [shellQuote(input.command), ...input.args.map((arg) => shellQuote(arg))].join(" ");
   const remoteScript = [
@@ -386,11 +368,6 @@ Replace the body of `buildSshSpawnTarget` and add `stdinPrefix: string` to its r
 In `createSshCommandManagedRuntimeRunner.execute`, replace the lines from `const envEntries = …` down to the `runSshCommand` call with:
 
 ```ts
-      const env = Object.fromEntries(
-        Object.entries(commandInput.env ?? {}).filter(
-          (entry): entry is [string, string] => typeof entry[1] === "string",
-        ),
-      );
       const commandScript =
         (command === "sh" || command === "bash") &&
         (args[0] === "-c" || args[0] === "-lc") &&
@@ -401,7 +378,7 @@ In `createSshCommandManagedRuntimeRunner.execute`, replace the lines from `const
 
       try {
         const result = await runSshCommand(input.spec, remoteCommand, {
-          env,
+          env: commandInput.env,
           stdin: commandInput.stdin,
           timeoutMs: commandInput.timeoutMs,
           maxBuffer: maxBufferBytes,
@@ -472,73 +449,28 @@ git commit -m "fix(ssh): send env on stdin instead of argv"
 ### Task 3: Poll the bridge once a second over SSH
 
 **Files:**
-- Modify: `packages/adapter-utils/src/execution-target.ts` (new export; the `startSandboxCallbackBridgeWorker({...})` call inside `startAdapterExecutionTargetPaperclipBridge`, near line 4807)
-- Test: `packages/adapter-utils/src/execution-target.test.ts`
+- Modify: `packages/adapter-utils/src/execution-target.ts` (the `startSandboxCallbackBridgeWorker({...})` call inside `startAdapterExecutionTargetPaperclipBridge`, near line 4807)
 
-**Interfaces:**
-- Produces: `export function bridgePollIntervalMsForTarget(target: AdapterExecutionTarget | null | undefined): number | undefined`
+**Interfaces:** None.
 
-- [ ] **Step 1: Write the failing test.** Add `bridgePollIntervalMsForTarget` to the `./execution-target.js` import, then add:
+This is a one-line constant, so no new test (ponytail: trivial one-liners need no test). After Task 1 each poll reuses one connection, so the value only limits how many remote shells run.
 
-```ts
-describe("bridgePollIntervalMsForTarget", () => {
-  it("polls once a second over ssh and keeps the default otherwise", () => {
-    expect(
-      bridgePollIntervalMsForTarget({
-        kind: "remote",
-        transport: "ssh",
-        remoteCwd: "/srv/paperclip/workspace",
-        spec: {
-          host: "ssh.example.test",
-          port: 22,
-          username: "ssh-user",
-          remoteCwd: "/srv/paperclip/workspace",
-          remoteWorkspacePath: "/srv/paperclip/workspace",
-          privateKey: null,
-          knownHosts: null,
-          strictHostKeyChecking: true,
-        },
-      }),
-    ).toBe(1_000);
-    expect(bridgePollIntervalMsForTarget(null)).toBeUndefined();
-  });
-});
-```
-
-- [ ] **Step 2: Run it and see it fail.**
-
-Run: `npx vitest run packages/adapter-utils/src/execution-target.test.ts -t "bridgePollIntervalMsForTarget"`
-Expected: FAIL with `bridgePollIntervalMsForTarget is not a function`.
-
-- [ ] **Step 3: Implement.** In `execution-target.ts`, add near the other bridge constants:
+- [ ] **Step 1: Implement.** Add this line to the `startSandboxCallbackBridgeWorker({ ... })` argument object:
 
 ```ts
-// Over ssh every bridge poll is a remote command. One poll a second keeps
-// agent API calls responsive without a stream of remote shells.
-const SSH_BRIDGE_POLL_INTERVAL_MS = 1_000;
-
-export function bridgePollIntervalMsForTarget(
-  target: AdapterExecutionTarget | null | undefined,
-): number | undefined {
-  return target?.kind === "remote" && target.transport === "ssh" ? SSH_BRIDGE_POLL_INTERVAL_MS : undefined;
-}
+      // Over ssh every poll is a remote command; once a second is enough.
+      pollIntervalMs: target.transport === "ssh" ? 1_000 : undefined,
 ```
 
-In `startAdapterExecutionTargetPaperclipBridge`, add this line to the `startSandboxCallbackBridgeWorker({ ... })` argument object:
+- [ ] **Step 2: Type-check and run the bridge tests.**
 
-```ts
-      pollIntervalMs: bridgePollIntervalMsForTarget(target),
-```
+Run: `npx tsc --noEmit -p packages/adapter-utils && npx vitest run packages/adapter-utils/src/execution-target-sandbox.test.ts`
+Expected: no type errors; all PASS.
 
-- [ ] **Step 4: Run it and see it pass.**
-
-Run: `npx vitest run packages/adapter-utils/src/execution-target.test.ts -t "bridgePollIntervalMsForTarget"`
-Expected: PASS.
-
-- [ ] **Step 5: Commit.**
+- [ ] **Step 3: Commit.**
 
 ```bash
-git add packages/adapter-utils/src/execution-target.ts packages/adapter-utils/src/execution-target.test.ts
+git add packages/adapter-utils/src/execution-target.ts
 git commit -m "fix(ssh): poll the callback bridge once a second over ssh"
 ```
 
@@ -832,5 +764,5 @@ Expected: PASS.
 ## Self-review record
 
 - Spec coverage: Part 1 items 1–6 map to Tasks 1–6, and Task 7 is verification. Parts 2–6 are configuration, runbook and content work; they go in the next plan (HPC company package).
-- Type consistency: `encodeSshEnvStdin`, `stdinPrefix`, `bridgePollIntervalMsForTarget` and `remoteRunDirForCleanup` use the same names in every task.
+- Type consistency: `encodeSshEnvStdin` (local to `ssh.ts`), `stdinPrefix` and `remoteRunDirForCleanup` use the same names in every task.
 - Local-agent note: agents that run in the Paperclip container run as the same Unix user as the server. They could use a live control socket, but they can already read the server's environment, so the socket does not widen that boundary. The directory is `0700`.

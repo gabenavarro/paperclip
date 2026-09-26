@@ -163,7 +163,7 @@ Skills are markdown, versioned in `doc/hpc/skills/<slug>/SKILL.md`. They ship wi
 Every item reuses a Paperclip feature that already exists.
 
 - **Helper scripts** in the `hpc-jobs` skill's `scripts/` folder. Agents run them with `bash`, because the exec bit can be lost on import. They are tested with fake `sbatch`, `squeue`, `sacct` and `scontrol` commands on `PATH`.
-  - `hpc-submit`: `sbatch --test-only`, then `--parsable`. It writes `logs/<jobid>.status.json` and prints the monitor update.
+  - `hpc-submit`: `sbatch --test-only`, then `--parsable`. It prints the monitor update.
   - `hpc-status`: one line per job, from `squeue` and `sacct -c`.
   - `hpc-diagnose`: maps a failure to a fix. It covers out-of-memory, timeout, `no kernel image`, a driver that is too old, an NVML version mismatch, a full disk, and failed Nextflow tasks.
   - `hpc-doctor`: checks GPU GRES, Apptainer, rootless Podman (from `podman info`), `NXF_VER`, `/data` permissions, the credential file's mode, and `PATH`.
