@@ -1170,4 +1170,36 @@ describe("ssh env-lab fixture", () => {
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toBe("v a l");
   }, SSH_FIXTURE_TEST_TIMEOUT_MS);
+
+  it("removes the per-run remote copy after a successful restore", async () => {
+    const rootDir = await createFixtureRootDir();
+    const statePath = path.join(rootDir, "state.json");
+    const localRepo = path.join(rootDir, "local-workspace");
+    await mkdir(localRepo, { recursive: true });
+    await git(localRepo, ["init"]);
+    await git(localRepo, ["checkout", "-b", "main"]);
+    await git(localRepo, ["config", "user.name", "Paperclip Test"]);
+    await git(localRepo, ["config", "user.email", "test@paperclip.dev"]);
+    await writeFile(path.join(localRepo, "tracked.txt"), "base\n", "utf8");
+    await git(localRepo, ["add", "tracked.txt"]);
+    await git(localRepo, ["commit", "-m", "initial"]);
+
+    const started = await startSshEnvLabFixtureOrSkip(statePath, "SSH run-directory cleanup test");
+    if (!started) return;
+    const config = await buildSshEnvLabFixtureConfig(started);
+    const prepared = await prepareRemoteManagedRuntime({
+      spec: { ...config, remoteCwd: started.workspaceDir },
+      runId: "run-cleanup",
+      adapterKey: "test-adapter",
+      workspaceLocalDir: localRepo,
+    });
+    const runDir = path.posix.dirname(prepared.workspaceRemoteDir);
+
+    await prepared.restoreWorkspace();
+
+    const probe = await runSshCommand(config, `test -e ${JSON.stringify(runDir)} && echo present || echo gone`, {
+      timeoutMs: 30_000,
+    });
+    expect(probe.stdout.trim()).toBe("gone");
+  }, SSH_FIXTURE_TEST_TIMEOUT_MS);
 });
