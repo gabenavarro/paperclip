@@ -19,6 +19,22 @@ describe("runAdapterExecutionTargetShellCommand", () => {
     vi.unstubAllEnvs();
   });
 
+  const SSH_TARGET = {
+    kind: "remote" as const,
+    transport: "ssh" as const,
+    remoteCwd: "/srv/paperclip/workspace",
+    spec: {
+      host: "ssh.example.test",
+      port: 22,
+      username: "ssh-user",
+      remoteCwd: "/srv/paperclip/workspace",
+      remoteWorkspacePath: "/srv/paperclip/workspace",
+      privateKey: null,
+      knownHosts: null,
+      strictHostKeyChecking: true,
+    },
+  };
+
   it("quotes remote shell commands with the shared SSH quoting helper", async () => {
     const runSshCommandSpy = vi.spyOn(ssh, "runSshCommand").mockResolvedValue({
       stdout: "",
@@ -199,6 +215,45 @@ describe("runAdapterExecutionTargetShellCommand", () => {
     });
     expect(onLog).toHaveBeenCalledWith("stdout", "partial stdout");
     expect(onLog).toHaveBeenCalledWith("stderr", "partial stderr");
+  });
+
+  it("treats an execFile timeout (killed, no code) as timedOut", async () => {
+    vi.spyOn(ssh, "runSshCommand").mockRejectedValue(
+      Object.assign(new Error("Command failed"), { code: null, killed: true, signal: "SIGTERM", stdout: "", stderr: "" }),
+    );
+
+    const result = await runAdapterExecutionTargetShellCommand("run-t1", SSH_TARGET, "sleep 99", {
+      cwd: "/tmp/local",
+      env: {},
+    });
+
+    expect(result).toMatchObject({ exitCode: null, signal: "SIGTERM", timedOut: true });
+  });
+
+  it("does not report a maxBuffer overflow as a timeout", async () => {
+    vi.spyOn(ssh, "runSshCommand").mockRejectedValue(
+      Object.assign(new Error("stdout maxBuffer length exceeded"), {
+        code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
+        killed: true,
+        signal: "SIGTERM",
+      }),
+    );
+
+    await expect(
+      runAdapterExecutionTargetShellCommand("run-t2", SSH_TARGET, "yes", { cwd: "/tmp/local", env: {} }),
+    ).rejects.toThrow("maxBuffer");
+  });
+
+  it("uses the default helper timeout when timeoutSec is 0", async () => {
+    const spy = vi.spyOn(ssh, "runSshCommand").mockResolvedValue({ stdout: "", stderr: "" });
+
+    await runAdapterExecutionTargetShellCommand("run-t3", SSH_TARGET, "true", {
+      cwd: "/tmp/local",
+      env: {},
+      timeoutSec: 0,
+    });
+
+    expect(spy).toHaveBeenCalledWith(expect.anything(), "true", expect.objectContaining({ timeoutMs: 15_000 }));
   });
 
   it("keeps managed homes disabled for both local and SSH targets", () => {

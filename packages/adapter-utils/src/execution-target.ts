@@ -944,7 +944,8 @@ export async function runAdapterExecutionTargetShellCommand(
         // identity var (NVM_DIR / PATH / etc.) that a profile re-exports.
         const result = await runSshCommand(target.spec, command, {
           env,
-          timeoutMs: (options.timeoutSec ?? 15) * 1000,
+          // `0` means "use the default", not "no timeout": a hung helper must not hang the run.
+          timeoutMs: (options.timeoutSec && options.timeoutSec > 0 ? options.timeoutSec : 15) * 1000,
         });
         if (result.stdout) await onLog("stdout", result.stdout);
         if (result.stderr) await onLog("stderr", result.stderr);
@@ -962,6 +963,7 @@ export async function runAdapterExecutionTargetShellCommand(
           stdout?: string;
           stderr?: string;
           signal?: string | null;
+          killed?: boolean;
         };
         const stdout = timedOutError.stdout ?? "";
         const stderr = timedOutError.stderr ?? "";
@@ -978,7 +980,10 @@ export async function runAdapterExecutionTargetShellCommand(
             startedAt,
           };
         }
-        if (timedOutError.code !== "ETIMEDOUT") {
+        // execFile reports its own timeout as `killed` with no exit code, not ETIMEDOUT.
+        const isTimeout =
+          timedOutError.code === "ETIMEDOUT" || (timedOutError.killed === true && timedOutError.code == null);
+        if (!isTimeout) {
           throw error;
         }
         if (stdout) await onLog("stdout", stdout);
