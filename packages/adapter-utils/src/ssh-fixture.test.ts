@@ -194,6 +194,30 @@ describe("ssh env-lab fixture", () => {
     expect(stopped.running).toBe(false);
   }, SSH_FIXTURE_TEST_TIMEOUT_MS);
 
+  it("reuses one SSH connection across commands", async () => {
+    const rootDir = await createFixtureRootDir();
+    const statePath = path.join(rootDir, "state.json");
+
+    const started = await startSshEnvLabFixtureOrSkip(statePath, "SSH connection reuse test");
+    if (!started) return;
+    const config = await buildSshEnvLabFixtureConfig(started);
+    // Count only the logins our commands cause; the fixture's own readiness
+    // check may log in before this point.
+    const countLogins = async () =>
+      (await readFile(started.sshdLogPath, "utf8")).match(/Accepted publickey/g)?.length ?? 0;
+    const loginsBefore = await countLogins();
+
+    const firstStartedAt = Date.now();
+    await runSshCommand(config, "true", { timeoutMs: 30_000 });
+    // A backgrounded master that kept our stdio pipes open would stall this
+    // call until ControlPersist ends (120 s).
+    expect(Date.now() - firstStartedAt).toBeLessThan(10_000);
+    await runSshCommand(config, "true", { timeoutMs: 30_000 });
+    await runSshCommand(config, "true", { timeoutMs: 30_000 });
+
+    expect((await countLogins()) - loginsBefore).toBeLessThanOrEqual(1);
+  }, SSH_FIXTURE_TEST_TIMEOUT_MS);
+
   it("resolves a relative statePath to the same absolute state across start, status, and stop", async () => {
     const rootDir = await createFixtureRootDir();
     const absoluteStatePath = path.join(rootDir, "state.json");

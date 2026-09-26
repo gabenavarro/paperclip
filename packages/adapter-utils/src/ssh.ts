@@ -371,6 +371,16 @@ async function withTempFile(
   };
 }
 
+// One private directory per server process for ssh control sockets (mkdtemp
+// creates it 0700). `%C` hashes host, port and user, so each target gets one
+// master connection that every later command reuses.
+let sshControlDirPath: string | undefined;
+
+async function sshControlDir(): Promise<string> {
+  sshControlDirPath ??= await fs.mkdtemp(path.join(os.tmpdir(), "pc-ssh-"));
+  return sshControlDirPath;
+}
+
 async function createSshAuthArgs(
   config: Pick<SshConnectionConfig, "privateKey" | "knownHosts" | "strictHostKeyChecking">,
 ): Promise<{ args: string[]; cleanup: () => Promise<void> }> {
@@ -382,6 +392,18 @@ async function createSshAuthArgs(
     "ConnectTimeout=10",
     "-o",
     `StrictHostKeyChecking=${config.strictHostKeyChecking ? "yes" : "no"}`,
+    // Reuse one authenticated connection per target (see sshControlDir), and
+    // notice a dead VPN within about a minute instead of TCP's ~2 hours.
+    "-o",
+    "ControlMaster=auto",
+    "-o",
+    `ControlPath=${path.join(await sshControlDir(), "%C")}`,
+    "-o",
+    "ControlPersist=120",
+    "-o",
+    "ServerAliveInterval=15",
+    "-o",
+    "ServerAliveCountMax=4",
   ];
 
   if (config.strictHostKeyChecking) {
