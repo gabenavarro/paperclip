@@ -939,9 +939,10 @@ export async function runAdapterExecutionTargetShellCommand(
       try {
         // Pass the raw command — `runSshCommand` owns profile sourcing and
         // the outer shell wrapper. Wrapping again here would nest a second
-        // shell after the explicit `env KEY=VAL` overrides, re-sourcing
-        // login profiles AFTER the override and silently undoing any
-        // identity var (NVM_DIR / PATH / etc.) that a profile re-exports.
+        // shell after the env block that `runSshCommand` sends on stdin and
+        // exports once the login profiles have run, re-sourcing login
+        // profiles AFTER that export and silently undoing any identity var
+        // (NVM_DIR / PATH / etc.) that a profile re-exports.
         const result = await runSshCommand(target.spec, command, {
           env,
           // `0` means "use the default", not "no timeout": a hung helper must not hang the run.
