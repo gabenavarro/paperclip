@@ -256,3 +256,27 @@ test("hpc-report-gpu-hours posts one cost event per job", () => {
   const posts = readFileSync(s.log, "utf8").split("\n").filter((line) => line.startsWith("POST "));
   assert.equal(posts.length, 1);
 });
+
+test("hpc-doctor passes on a ready box and fails when podman is not rootless", () => {
+  const s = sandbox();
+  const credential = path.join(s.root, "gcp.json");
+  writeFileSync(credential, "{}", { mode: 0o600 });
+
+  const ok = run(path.join(jobsScripts, "hpc-doctor.sh"), [], {
+    ...s.env,
+    NXF_VER: "25.04.6",
+    GOOGLE_APPLICATION_CREDENTIALS: credential,
+  });
+  assert.equal(ok.status, 0, ok.stdout + ok.stderr);
+  assert.match(ok.stdout, /^PASS podman-rootless/m);
+  assert.match(ok.stdout, /^PASS gcp-credentials/m);
+  assert.match(ok.stdout, /all checks passed/);
+
+  const bad = run(path.join(jobsScripts, "hpc-doctor.sh"), [], {
+    ...s.env,
+    NXF_VER: "25.04.6",
+    FAKE_PODMAN_INFO: "false overlay",
+  });
+  assert.equal(bad.status, 1);
+  assert.match(bad.stdout, /^FAIL podman-rootless/m);
+});
