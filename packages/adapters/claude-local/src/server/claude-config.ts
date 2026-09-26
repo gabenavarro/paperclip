@@ -12,6 +12,7 @@ import {
   maybeRunSandboxInstallCommand,
   prepareAdapterExecutionTargetRuntime,
   runAdapterExecutionTargetShellCommand,
+  throwIfShellCommandTimedOut,
   type AdapterExecutionTarget,
   type AdapterExecutionTargetShellOptions,
 } from "@paperclipai/adapter-utils/execution-target";
@@ -240,14 +241,17 @@ export async function materializeRemoteClaudeConfig(input: {
   remoteClaudeConfigSeedDir: string;
   options: AdapterExecutionTargetShellOptions;
 }): Promise<void> {
-  await runAdapterExecutionTargetShellCommand(
-    input.runId,
-    input.target,
-    buildRemoteClaudeConfigMaterializationCommand({
-      remoteClaudeConfigDir: input.remoteClaudeConfigDir,
-      remoteClaudeConfigSeedDir: input.remoteClaudeConfigSeedDir,
-    }),
-    input.options,
+  throwIfShellCommandTimedOut(
+    await runAdapterExecutionTargetShellCommand(
+      input.runId,
+      input.target,
+      buildRemoteClaudeConfigMaterializationCommand({
+        remoteClaudeConfigDir: input.remoteClaudeConfigDir,
+        remoteClaudeConfigSeedDir: input.remoteClaudeConfigSeedDir,
+      }),
+      input.options,
+    ),
+    "Materializing the Claude config on the remote host",
   );
 }
 

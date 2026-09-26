@@ -11,6 +11,7 @@ import {
   resolveAdapterExecutionTargetCwd,
   runAdapterExecutionTargetProcess,
   runAdapterExecutionTargetShellCommand,
+  throwIfShellCommandTimedOut,
 } from "./execution-target.js";
 
 describe("runAdapterExecutionTargetShellCommand", () => {
@@ -490,5 +491,19 @@ describe("GitHub launcher lifecycle", () => {
       cwd: "/remote/workspace", timeoutMs: 5_000 });
     await expect(cleanupGitHubOperationLaunchers({ runId: "../other", target })).rejects.toThrow("Invalid GitHub launcher run ID");
     expect(runner.execute).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("throwIfShellCommandTimedOut", () => {
+  const base = { exitCode: 0, signal: null, timedOut: false, stdout: "", stderr: "", pid: null, startedAt: new Date().toISOString() };
+
+  it("throws with the label and stderr tail when the command timed out", () => {
+    expect(() => throwIfShellCommandTimedOut({ ...base, exitCode: null, timedOut: true, stderr: "cp: slow disk\n" }, "Copying skills"))
+      .toThrow("Copying skills timed out: cp: slow disk");
+  });
+
+  it("returns the result unchanged when it did not time out, even on a non-zero exit", () => {
+    const failed = { ...base, exitCode: 1, stderr: "no such file" };
+    expect(throwIfShellCommandTimedOut(failed, "Copying skills")).toBe(failed);
   });
 });

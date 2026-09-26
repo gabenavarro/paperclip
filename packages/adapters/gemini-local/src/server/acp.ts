@@ -14,6 +14,7 @@ import {
   readAdapterExecutionTarget,
   resolveAdapterExecutionTargetCwd,
   runAdapterExecutionTargetShellCommand,
+  throwIfShellCommandTimedOut,
 } from "@paperclipai/adapter-utils/execution-target";
 import {
   DEFAULT_ACP_ENGINE_MODE,
@@ -203,11 +204,14 @@ async function prepareGeminiRemoteManagedHome(
   const remoteSkillsAssetDir = stagedRuntime.assetDirs.skills;
   if (remoteSkillsAssetDir) {
     const remoteSkillsDir = path.posix.join(managedRemoteHomeDir, ".gemini", "skills");
-    await runAdapterExecutionTargetShellCommand(
-      runId,
-      executionTarget,
-      `mkdir -p ${JSON.stringify(path.posix.dirname(remoteSkillsDir))} && rm -rf ${JSON.stringify(remoteSkillsDir)} && cp -a ${JSON.stringify(remoteSkillsAssetDir)} ${JSON.stringify(remoteSkillsDir)}`,
-      shellOptions,
+    throwIfShellCommandTimedOut(
+      await runAdapterExecutionTargetShellCommand(
+        runId,
+        executionTarget,
+        `mkdir -p ${JSON.stringify(path.posix.dirname(remoteSkillsDir))} && rm -rf ${JSON.stringify(remoteSkillsDir)} && cp -a ${JSON.stringify(remoteSkillsAssetDir)} ${JSON.stringify(remoteSkillsDir)}`,
+        shellOptions,
+      ),
+      "Copying Gemini skills to the remote host",
     );
   }
 
@@ -231,11 +235,14 @@ async function prepareGeminiRemoteManagedHome(
       selectedAuthType: "gemini-api-key",
       security: { auth: { selectedType: "gemini-api-key" } },
     });
-    await runAdapterExecutionTargetShellCommand(
-      runId,
-      executionTarget,
-      `mkdir -p ${JSON.stringify(path.posix.dirname(remoteSettingsPath))} && { [ -f ${JSON.stringify(remoteSettingsPath)} ] || printf '%s' ${JSON.stringify(authSettingsJson)} > ${JSON.stringify(remoteSettingsPath)}; }`,
-      shellOptions,
+    throwIfShellCommandTimedOut(
+      await runAdapterExecutionTargetShellCommand(
+        runId,
+        executionTarget,
+        `mkdir -p ${JSON.stringify(path.posix.dirname(remoteSettingsPath))} && { [ -f ${JSON.stringify(remoteSettingsPath)} ] || printf '%s' ${JSON.stringify(authSettingsJson)} > ${JSON.stringify(remoteSettingsPath)}; }`,
+        shellOptions,
+      ),
+      "Writing Gemini settings on the remote host",
     );
   }
 

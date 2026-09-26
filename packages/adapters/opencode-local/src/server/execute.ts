@@ -23,6 +23,7 @@ import {
   resolveAdapterExecutionTargetCommandForLogs,
   runAdapterExecutionTargetProcess,
   runAdapterExecutionTargetShellCommand,
+  throwIfShellCommandTimedOut,
   startAdapterExecutionTargetPaperclipBridge,
 } from "@paperclipai/adapter-utils/execution-target";
 import {
@@ -454,11 +455,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           });
       if (remoteHomeDir && preparedExecutionTargetRuntime.assetDirs.skills) {
         const remoteSkillsDir = path.posix.join(remoteHomeDir, ".claude", "skills");
-        await runAdapterExecutionTargetShellCommand(
-          runId,
-          executionTarget,
-          `mkdir -p ${JSON.stringify(path.posix.dirname(remoteSkillsDir))} && rm -rf ${JSON.stringify(remoteSkillsDir)} && cp -a ${JSON.stringify(preparedExecutionTargetRuntime.assetDirs.skills)} ${JSON.stringify(remoteSkillsDir)}`,
-          { cwd, env: preparedRuntimeConfig.env, timeoutSec, graceSec, onLog },
+        throwIfShellCommandTimedOut(
+          await runAdapterExecutionTargetShellCommand(
+            runId,
+            executionTarget,
+            `mkdir -p ${JSON.stringify(path.posix.dirname(remoteSkillsDir))} && rm -rf ${JSON.stringify(remoteSkillsDir)} && cp -a ${JSON.stringify(preparedExecutionTargetRuntime.assetDirs.skills)} ${JSON.stringify(remoteSkillsDir)}`,
+            { cwd, env: preparedRuntimeConfig.env, timeoutSec, graceSec, onLog },
+          ),
+          "Copying OpenCode skills to the remote host",
         );
       }
       await ensureRemoteOpenCodeModelConfiguredAndAvailable({

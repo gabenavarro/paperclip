@@ -1026,6 +1026,15 @@ export async function runAdapterExecutionTargetShellCommand(
   );
 }
 
+/** Setup steps that ignore a shell command's result must still fail loudly when it timed out. */
+export function throwIfShellCommandTimedOut(result: RunProcessResult, label: string): RunProcessResult {
+  if (result.timedOut) {
+    const detail = result.stderr.trim().slice(-500);
+    throw new Error(`${label} timed out${detail ? `: ${detail}` : ""}`);
+  }
+  return result;
+}
+
 export interface AdapterSandboxInstallCommandCheck {
   code: string;
   level: "info" | "warn" | "error";
