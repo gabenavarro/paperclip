@@ -659,7 +659,9 @@ describe("ssh env-lab fixture", () => {
     // quotes are escaped. Assert the command still runs: cd, env, and the argv.
     expect(remoteScript).toContain("cd ");
     expect(remoteScript).toContain("/srv/paperclip/workspace");
-    expect(remoteScript).toContain("base64 -d");
+    // base64 is resolved once into a variable up front and invoked through
+    // it, rather than by bare name in the decode step.
+    expect(remoteScript).toContain('"$__pc_b" -d');
     // Profiles cannot read stdin, so they cannot eat the env block or the prompt.
     expect(remoteScript).toContain("</dev/null");
     expect(remoteScript).toContain("node");
