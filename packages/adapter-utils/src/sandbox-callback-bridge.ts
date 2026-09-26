@@ -188,6 +188,10 @@ export const DEFAULT_SANDBOX_CALLBACK_BRIDGE_ROUTE_ALLOWLIST: readonly SandboxCa
   // Subtasks / delegation
   { method: "POST", path: /^\/api\/companies\/[^/]+\/issues$/ },
 
+  // Costs: remote agents report non-token usage such as GPU-hours. The server
+  // only accepts an agent's own costs.
+  { method: "POST", path: /^\/api\/companies\/[^/]+\/cost-events$/ },
+
   // Hiring (paperclip-create-agent skill): adapter/icon discovery, comparing
   // existing agent configs, submitting the hire request, and linking the
   // resulting approval to its source issue. Direct agent creation

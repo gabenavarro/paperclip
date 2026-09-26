@@ -370,6 +370,15 @@ describe("sandbox callback bridge", () => {
     });
   });
 
+  it("allows agents to report cost events through the bridge", () => {
+    expect(
+      authorizeSandboxCallbackBridgeRequestWithRoutes({ method: "POST", path: "/api/companies/company-1/cost-events" }),
+    ).toBeNull();
+    expect(
+      authorizeSandboxCallbackBridgeRequestWithRoutes({ method: "GET", path: "/api/companies/company-1/cost-events" }),
+    ).toBe("Route not allowed: GET /api/companies/company-1/cost-events");
+  });
+
   it("drains already-queued requests on stop", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-bridge-drain-"));
     cleanupDirs.push(rootDir);
