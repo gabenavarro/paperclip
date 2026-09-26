@@ -1133,6 +1133,21 @@ describe("ssh env-lab fixture", () => {
     expect(result.stdout).toBe("one|payload\nmore\n");
   }, SSH_FIXTURE_TEST_TIMEOUT_MS);
 
+  it("does not crash when the remote command exits before reading a large stdin payload", async () => {
+    const rootDir = await createFixtureRootDir();
+    const statePath = path.join(rootDir, "state.json");
+    const started = await startSshEnvLabFixtureOrSkip(statePath, "SSH stdin EPIPE test");
+    if (!started) return;
+    const config = await buildSshEnvLabFixtureConfig(started);
+
+    const result = await runSshCommand(config, "exit 0", {
+      stdin: "x".repeat(4 * 1024 * 1024),
+      timeoutMs: 30_000,
+    });
+
+    expect(result).toBeDefined();
+  }, SSH_FIXTURE_TEST_TIMEOUT_MS);
+
   it("runs a remote child process with env on stdin before the prompt", async () => {
     const rootDir = await createFixtureRootDir();
     const statePath = path.join(rootDir, "state.json");

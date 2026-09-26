@@ -343,6 +343,11 @@ async function spawnText(
     });
 
     if (options.stdin != null && child.stdin) {
+      // A child that exits before reading its stdin turns this write into an
+      // EPIPE. Without a listener, that surfaces as an unhandled 'error'
+      // event and crashes the process; the close handler above already
+      // reports the failure.
+      child.stdin.on("error", () => {});
       child.stdin.end(options.stdin);
     }
   });
@@ -728,6 +733,11 @@ async function streamLocalFileToSsh(input: {
     });
     source.on("error", fail);
     ssh.on("error", fail);
+    // A remote script that exits before reading the piped file turns the
+    // write into an EPIPE. Without a listener, that surfaces as an unhandled
+    // 'error' event and crashes the process; ssh's own close handler below
+    // already reports the failure.
+    ssh.stdin?.on("error", () => {});
     if (input.progress) {
       input.progress.counter.on("error", fail);
       source.pipe(input.progress.counter).pipe(ssh.stdin ?? null);
