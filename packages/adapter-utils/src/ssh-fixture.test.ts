@@ -1,6 +1,6 @@
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -621,6 +621,33 @@ describe("ssh env-lab fixture", () => {
 
     await expect(runSshCommand(config, "true", { timeoutMs: 30_000 })).resolves.toBeDefined();
   }, SSH_FIXTURE_TEST_TIMEOUT_MS);
+
+  it("stops using a control-socket directory that other users can enter", async () => {
+    const spec = {
+      host: "ssh.example.test",
+      port: 22,
+      username: "ssh-user",
+      remoteCwd: "/srv/paperclip/workspace",
+      remoteWorkspacePath: "/srv/paperclip/workspace",
+      privateKey: null,
+      knownHosts: null,
+      strictHostKeyChecking: true,
+    };
+    const controlDirOf = async () => {
+      const target = await buildSshSpawnTarget({ spec, command: "true", args: [], env: {} });
+      await target.cleanup();
+      const controlPathArg = target.args.find((arg) => arg.startsWith("ControlPath="));
+      return path.dirname(controlPathArg!.slice("ControlPath=".length));
+    };
+
+    const first = await controlDirOf();
+    await chmod(first, 0o777);
+    const second = await controlDirOf();
+    await rm(first, { recursive: true, force: true });
+
+    expect(second).not.toBe(first);
+    expect((await stat(second)).mode & 0o077).toBe(0);
+  });
 
   it("builds a remote script that sources login profiles but no nvm", async () => {
     const target = await buildSshSpawnTarget({
@@ -1269,6 +1296,56 @@ describe("ssh env-lab fixture", () => {
     });
 
     expect(result).toBeDefined();
+  }, SSH_FIXTURE_TEST_TIMEOUT_MS);
+
+  it("rejects with the remote error when a workspace upload fails before the remote side reads it", async () => {
+    const rootDir = await createFixtureRootDir();
+    const statePath = path.join(rootDir, "state.json");
+    const localDir = path.join(rootDir, "local");
+    await mkdir(localDir, { recursive: true });
+    await writeFile(path.join(localDir, "big.bin"), Buffer.alloc(8 * 1024 * 1024));
+    const started = await startSshEnvLabFixtureOrSkip(statePath, "SSH upload EPIPE test");
+    if (!started) return;
+    const config = await buildSshEnvLabFixtureConfig(started);
+    // A file where the remote directory should be: `mkdir -p` fails, and the
+    // remote shell exits without reading the archive.
+    const blocker = path.join(started.workspaceDir, "not-a-dir");
+    await writeFile(blocker, "");
+
+    await expect(
+      syncDirectoryToSsh({
+        spec: { ...config, remoteCwd: started.workspaceDir },
+        localDir,
+        remoteDir: path.posix.join(blocker, "sub"),
+      }),
+    ).rejects.toThrow(/not-a-dir/);
+  }, SSH_FIXTURE_TEST_TIMEOUT_MS);
+
+  it("rejects with the local tar error when a workspace restore fails before tar reads it", async () => {
+    const rootDir = await createFixtureRootDir();
+    const statePath = path.join(rootDir, "state.json");
+    const localDir = path.join(rootDir, "local");
+    const fakeBin = path.join(rootDir, "bin");
+    await mkdir(localDir, { recursive: true });
+    await mkdir(fakeBin, { recursive: true });
+    // A local tar that fails without reading its stdin, like one on a full disk.
+    await writeFile(path.join(fakeBin, "tar"), "#!/bin/sh\necho 'tar: disk full' >&2\nexit 2\n", { mode: 0o755 });
+    const started = await startSshEnvLabFixtureOrSkip(statePath, "SSH restore EPIPE test");
+    if (!started) return;
+    const config = await buildSshEnvLabFixtureConfig(started);
+    const remoteDir = path.posix.join(started.workspaceDir, "restore-epipe");
+    await mkdir(remoteDir, { recursive: true });
+    await writeFile(path.join(remoteDir, "big.bin"), Buffer.alloc(8 * 1024 * 1024));
+
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${fakeBin}:${savedPath}`;
+    try {
+      await expect(
+        syncDirectoryFromSsh({ spec: { ...config, remoteCwd: started.workspaceDir }, remoteDir, localDir }),
+      ).rejects.toThrow(/disk full/);
+    } finally {
+      process.env.PATH = savedPath;
+    }
   }, SSH_FIXTURE_TEST_TIMEOUT_MS);
 
   it("runs a remote child process with env on stdin before the prompt", async () => {

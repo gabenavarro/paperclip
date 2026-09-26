@@ -414,17 +414,15 @@ async function withTempFile(
 let sshControlDirPath: string | undefined;
 
 async function sshControlDir(): Promise<string> {
-  if (sshControlDirPath) {
-    try {
-      await fs.stat(sshControlDirPath);
-      return sshControlDirPath;
-    } catch {
-      // The directory vanished from under us (e.g. an external cleanup).
-      // ssh fails every later call with "unix_listener: ... No such file or
-      // directory" once its ControlPath directory is gone, so mint a fresh
-      // one instead of memoizing a dead path forever.
-      sshControlDirPath = undefined;
-    }
+  // Reuse the directory only while it is still ours and private. A tmp cleaner
+  // can remove it: ssh then fails every call ("unix_listener: ... No such file
+  // or directory"), and another local user could re-create the name, which is
+  // visible in ssh's argv, and receive our sessions and their stdin.
+  const dir = sshControlDirPath;
+  const info = dir ? await fs.lstat(dir).catch(() => null) : null;
+  const uid = process.getuid?.();
+  if (dir && info?.isDirectory() && (uid === undefined || (info.uid === uid && (info.mode & 0o077) === 0))) {
+    return dir;
   }
   sshControlDirPath = await fs.mkdtemp(path.join(os.tmpdir(), "pc-ssh-"));
   return sshControlDirPath;
@@ -1448,13 +1446,15 @@ export async function syncDirectoryToSsh(input: {
     let sshExited = false;
     let tarExitCode: number | null = null;
     let sshExitCode: number | null = null;
+    // True once we stop tar ourselves; its exit code then says nothing.
+    let tarStopped = false;
 
     const maybeFinish = () => {
       if (settled || !tarExited || !sshExited) {
         return;
       }
       settled = true;
-      if ((tarExitCode ?? 0) !== 0) {
+      if (!tarStopped && (tarExitCode ?? 0) !== 0) {
         reject(new Error(tarStderr.trim() || `tar exited with code ${tarExitCode ?? -1}`));
         return;
       }
@@ -1475,6 +1475,11 @@ export async function syncDirectoryToSsh(input: {
       reject(error);
     };
 
+    // ssh can exit before it reads the whole archive (a failed mkdir, login or
+    // host-key check). Its stdin then fails with EPIPE, or Node closes it and
+    // unpipes tar. Ignore that error: the close handler below stops tar, which
+    // would block forever, and reports ssh's error.
+    ssh.stdin?.on("error", () => {});
     if (progress) {
       progress.counter.on("error", fail);
       tar.stdout?.pipe(progress.counter).pipe(ssh.stdin ?? null);
@@ -1498,6 +1503,7 @@ export async function syncDirectoryToSsh(input: {
     ssh.on("close", (code) => {
       sshExited = true;
       sshExitCode = code;
+      if (code !== 0) tarStopped = tar.kill("SIGTERM");
       maybeFinish();
     });
     }).finally(auth.cleanup);
@@ -1563,11 +1569,13 @@ export async function syncDirectoryFromSsh(input: {
       let tarExited = false;
       let sshExitCode: number | null = null;
       let tarExitCode: number | null = null;
+      // True once we stop ssh ourselves; its exit code (255) then says nothing.
+      let sshStopped = false;
 
       const maybeFinish = () => {
         if (settled || !sshExited || !tarExited) return;
         settled = true;
-        if ((sshExitCode ?? 0) !== 0) {
+        if (!sshStopped && (sshExitCode ?? 0) !== 0) {
           reject(new Error(sshStderr.trim() || `ssh exited with code ${sshExitCode ?? -1}`));
           return;
         }
@@ -1586,6 +1594,11 @@ export async function syncDirectoryFromSsh(input: {
         reject(error);
       };
 
+      // tar can exit before it reads the whole archive (a full disk). Its stdin
+      // then fails with EPIPE, or Node closes it and unpipes ssh. Ignore that
+      // error: the close handler below stops ssh, which would block forever,
+      // and reports tar's error.
+      tar.stdin?.on("error", () => {});
       if (progress) {
         progress.counter.on("error", fail);
         ssh.stdout?.pipe(progress.counter).pipe(tar.stdin ?? null);
@@ -1609,6 +1622,7 @@ export async function syncDirectoryFromSsh(input: {
       tar.on("close", (code) => {
         tarExited = true;
         tarExitCode = code;
+        if (code !== 0) sshStopped = ssh.kill("SIGTERM");
         maybeFinish();
       });
     });
