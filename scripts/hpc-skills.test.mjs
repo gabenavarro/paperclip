@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -27,7 +27,7 @@ exit 0`,
   apptainer: `printf 'apptainer %s\\n' "$*" >> "$FAKE_LOG"
 case "$1" in
   --version) echo "apptainer version 1.4.1" ;;
-  build) printf 'fake sif\\n' > "$2" ;;
+  build) printf 'fake sif\\n' > "$2"; printf 'APPTAINER_TMPDIR=%s\\n' "\${APPTAINER_TMPDIR:-}" >> "$FAKE_LOG" ;;
   inspect) echo "cuda: 12.8" ;;
 esac`,
   podman: `printf 'podman %s\\n' "$*" >> "$FAKE_LOG"
@@ -35,7 +35,8 @@ case "$1" in
   info) echo "\${FAKE_PODMAN_INFO:-true overlay}" ;;
   save) while [ $# -gt 0 ]; do if [ "$1" = "-o" ]; then printf 'tar' > "$2"; fi; shift; done ;;
 esac`,
-  curl: `method=GET; data=""; url=""
+  curl: `printf 'ARGV %s\\n' "$*" >> "$FAKE_LOG"
+method=GET; data=""; url=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -X) method="$2"; shift 2 ;;
@@ -118,6 +119,9 @@ test("hpc-submit validates, submits, and merges the monitor into the issue polic
   assert.match(body, /apptainer exec --nv --containall/);
   assert.match(body, /--bind \S+:\/refs:ro/);
   assert.match(body, /python \/work\/code\/train\.py --lr 3e-4/);
+  assert.ok(body.includes(`--bind ${s.env.HPC_JOBS_ROOT}:${s.env.HPC_JOBS_ROOT}:ro`), "absolute links into other job directories must resolve");
+  assert.ok(body.includes(`--bind ${s.env.HPC_REFS_ROOT}:${s.env.HPC_REFS_ROOT}:ro`), "absolute links into the refs must resolve");
+  assert.doesNotMatch(calls, /bridge-token/, "the bridge token must stay out of curl's argv");
   const patch = calls.split("\n").find((line) => line.startsWith("PATCH "));
   const sent = JSON.parse(patch.slice(patch.indexOf("{")));
   assert.equal(sent.executionPolicy.stages.length, 1, "the existing review stage must be kept");
@@ -293,8 +297,95 @@ test("hpc-build-image stores a sha-named sif and rejects bad names", () => {
   const built = r.stdout.match(/^image: (.+\/torch\/2\.8-cu128-[0-9a-f]{12}\.sif)$/m);
   assert.ok(built, r.stdout);
   assert.ok(existsSync(built[1]));
-  assert.match(readFileSync(s.log, "utf8"), /podman build -t localhost\/torch:2\.8-cu128/);
+  const buildCalls = readFileSync(s.log, "utf8");
+  assert.match(buildCalls, /podman build -t localhost\/torch:2\.8-cu128/);
+  assert.ok(buildCalls.includes(`apptainer build ${s.env.HPC_IMAGES_ROOT}/`), "stage the build next to the images, not in /tmp");
+  assert.ok(buildCalls.includes(`APPTAINER_TMPDIR=${s.env.HPC_IMAGES_ROOT}/`), buildCalls);
 
   const bad = run(path.join(imagesScripts, "hpc-build-image.sh"), ["Bad Name", "x", context], s.env);
   assert.equal(bad.status, 2);
+});
+
+const REQUEUED_LINE =
+  "JobId=5000 JobState=REQUEUED StartTime=2026-09-26T00:00:00 EndTime=2026-09-26T12:00:00 Tres=cpu=16,mem=64G,node=1,gres/gpu=2 ExitCode=0:15\n";
+const FINAL_LINE =
+  "JobId=5000 JobState=COMPLETED StartTime=2026-09-26T12:10:00 EndTime=2026-09-26T22:10:00 Tres=cpu=16,mem=64G,node=1,gres/gpu=2 ExitCode=0:0\n";
+
+test("a requeued job is read from its last record, and its GPU-hours sum every run", () => {
+  const s = sandbox();
+  const job = path.join(s.env.HPC_JOBS_ROOT, "ISS-5", "long");
+  mkdirSync(path.join(job, "logs"), { recursive: true });
+  const env = { ...s.env, ...apiEnv, FAKE_ISSUE_JSON: ISSUE, HPC_GPU_HOUR_CENTS: "100" };
+
+  writeFileSync(s.env.HPC_JOBCOMP_LOG, REQUEUED_LINE);
+  const early = run(path.join(jobsScripts, "hpc-report-gpu-hours.sh"), ["5000", job], env);
+  assert.equal(early.status, 2);
+  assert.match(early.stderr, /requeued/);
+
+  writeFileSync(s.env.HPC_JOBCOMP_LOG, REQUEUED_LINE + FINAL_LINE);
+  const status = run(path.join(jobsScripts, "hpc-status.sh"), ["5000"], env);
+  assert.equal(status.status, 0, status.stderr);
+  assert.match(status.stdout, /^5000 COMPLETED /m);
+  assert.doesNotMatch(readFileSync(s.log, "utf8"), /^PATCH /m);
+
+  const report = run(path.join(jobsScripts, "hpc-report-gpu-hours.sh"), ["5000", job], env);
+  assert.equal(report.status, 0, report.stderr);
+  assert.match(report.stdout, /reported 44\.00 GPU-hours \(4400 cents\)/);
+});
+
+test("the monitor keeps its escalation deadline after it has fired", () => {
+  const s = sandbox();
+  const firedIssue = JSON.stringify({
+    id: "issue-1",
+    executionPolicy: { mode: "normal", commentRequired: true, stages: [{ type: "review", participants: [] }] },
+    executionState: { monitor: { status: "triggered", timeoutAt: "2099-01-01T00:00:00.000Z", kind: "external_service" } },
+  });
+  const env = { ...s.env, ...apiEnv, FAKE_ISSUE_JSON: firedIssue };
+  const deadline = () => {
+    const patch = readFileSync(s.log, "utf8").split("\n").findLast((line) => line.startsWith("PATCH "));
+    return JSON.parse(patch.slice(patch.indexOf("{"))).executionPolicy.monitor.timeoutAt;
+  };
+
+  const status = run(path.join(jobsScripts, "hpc-status.sh"), ["4242"], {
+    ...env,
+    FAKE_SQUEUE: "4242 RUNNING elapsed=2:00:00 gres=gres/gpu:1 reason=None",
+  });
+  assert.equal(status.status, 0, status.stderr);
+  assert.equal(deadline(), "2099-01-01T00:00:00.000Z");
+
+  const job = path.join(s.env.HPC_JOBS_ROOT, "ISS-1", "second");
+  mkdirSync(job, { recursive: true });
+  const submit = run(path.join(jobsScripts, "hpc-submit.sh"), ["--job", job, "--gpus", "0", "--", "true"], env);
+  assert.equal(submit.status, 0, submit.stderr);
+  assert.equal(deadline(), "2099-01-01T00:00:00.000Z", "a second submit keeps the later deadline");
+});
+
+test("hpc-status keeps checking a job whose state it cannot read", () => {
+  const s = sandbox();
+
+  const r = run(path.join(jobsScripts, "hpc-status.sh"), ["7777"], { ...s.env, ...apiEnv, FAKE_ISSUE_JSON: ISSUE });
+
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /^7777 UNKNOWN/m);
+  assert.match(readFileSync(s.log, "utf8"), /^PATCH /m);
+});
+
+test("hpc-submit accepts a jobs root with a trailing slash or behind a symlink", () => {
+  const s = sandbox();
+  const job = path.join(s.env.HPC_JOBS_ROOT, "ISS-6", "j");
+  mkdirSync(job, { recursive: true });
+
+  const slash = run(path.join(jobsScripts, "hpc-submit.sh"), ["--job", job, "--gpus", "0", "--", "true"], {
+    ...s.env,
+    HPC_JOBS_ROOT: `${s.env.HPC_JOBS_ROOT}/`,
+  });
+  assert.equal(slash.status, 0, slash.stderr);
+
+  const link = path.join(s.root, "jobs-link");
+  symlinkSync(s.env.HPC_JOBS_ROOT, link);
+  const viaLink = run(path.join(jobsScripts, "hpc-submit.sh"), ["--job", path.join(link, "ISS-6", "j"), "--gpus", "0", "--", "true"], {
+    ...s.env,
+    HPC_JOBS_ROOT: link,
+  });
+  assert.equal(viaLink.status, 0, viaLink.stderr);
 });

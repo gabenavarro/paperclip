@@ -8,15 +8,22 @@ set -euo pipefail
 [[ $# -eq 2 ]] || die "usage: hpc-report-gpu-hours.sh JOBID JOB_DIR"
 id="$1" marker="$2/logs/$1.cost-reported"
 if [[ -f "$marker" ]]; then printf 'already reported job %s\n' "$id"; exit 0; fi
-line=$(grep -m1 "JobId=$id " "$HPC_JOBCOMP_LOG" 2>/dev/null) || die "job $id is not in $HPC_JOBCOMP_LOG yet (still running?)"
-gpus=$(sed -n 's/.*gres\/gpu=\([0-9]*\).*/\1/p' <<<"$(field Tres "$line")")
-if [[ -z "$gpus" || "$gpus" -eq 0 ]]; then
+# A requeued job has one record per run: add them all, once the last one is final.
+records=$(grep "^JobId=$id " "$HPC_JOBCOMP_LOG" 2>/dev/null) || die "job $id is not in $HPC_JOBCOMP_LOG yet (still running?)"
+last=$(tail -n1 <<<"$records")
+[[ "$(field JobState "$last")" != REQUEUED ]] || die "job $id was requeued and has not finished yet"
+gpu_seconds=0
+while IFS= read -r line; do
+  gpus=$(sed -n 's/.*gres\/gpu=\([0-9]*\).*/\1/p' <<<"$(field Tres "$line")")
+  start=$(date -d "$(field StartTime "$line")" +%s 2>/dev/null) || continue
+  end=$(date -d "$(field EndTime "$line")" +%s 2>/dev/null) || continue
+  gpu_seconds=$(( gpu_seconds + ${gpus:-0} * (end - start) ))
+done <<<"$records"
+if [[ $gpu_seconds -eq 0 ]]; then
   mkdir -p "$(dirname "$marker")"; touch "$marker"
   printf 'job %s used no GPUs; nothing to report\n' "$id"; exit 0
 fi
-start=$(date -d "$(field StartTime "$line")" +%s)
-end=$(date -d "$(field EndTime "$line")" +%s)
-gpu_seconds=$(( gpus * (end - start) ))
+end=$(date -d "$(field EndTime "$last")" +%s)
 hours=$(awk -v s="$gpu_seconds" 'BEGIN { printf "%.2f", s / 3600 }')
 if [[ -n "${HPC_GPU_HOUR_CENTS:-}" ]]; then
   cents=$(awk -v s="$gpu_seconds" -v r="$HPC_GPU_HOUR_CENTS" 'BEGIN { c = s / 3600 * r; printf "%d", (c == int(c)) ? c : int(c) + 1 }')

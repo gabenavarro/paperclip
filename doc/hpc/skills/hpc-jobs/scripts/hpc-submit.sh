@@ -28,7 +28,7 @@ done
 [[ "$gpus" =~ ^[0-9]+$ && "$cpus" =~ ^[0-9]+$ ]] || die "--gpus and --cpus take whole numbers"
 [[ "$time" =~ ^[0-9]+$ ]] || die "--time takes minutes (1440 = 24 h)"
 job=$(realpath -m "$job")
-[[ "$job" == "$HPC_JOBS_ROOT"/* ]] || die "job directory must be under $HPC_JOBS_ROOT"
+[[ "$job" == "$(realpath -m "$HPC_JOBS_ROOT")"/* ]] || die "job directory must be under $HPC_JOBS_ROOT"
 [[ -z "$image" || -f "$image" ]] || die "image not found: $image"
 mkdir -p "$job/logs" "$job/tmp"
 
@@ -36,8 +36,12 @@ command=("$@")
 if [[ -n "$image" ]]; then
   nv=()
   [[ "$gpus" -gt 0 ]] && nv=(--nv)
+  # The roots are also bound read-only at their own paths, so absolute links in
+  # inputs/ (to refs or to another job's outputs) resolve in the container.
+  jobs_root="${HPC_JOBS_ROOT%/}" refs_root="${HPC_REFS_ROOT%/}"
   command=(apptainer exec "${nv[@]}" --containall --workdir "$job/tmp"
-    --bind "$job:/work" --bind "$HPC_REFS_ROOT:/refs:ro" "$image" "$@")
+    --bind "$job:/work" --bind "$refs_root:/refs:ro"
+    --bind "$jobs_root:$jobs_root:ro" --bind "$refs_root:$refs_root:ro" "$image" "$@")
 fi
 script="$job/logs/submit-$(date -u +%Y%m%dT%H%M%SZ).sbatch"
 {

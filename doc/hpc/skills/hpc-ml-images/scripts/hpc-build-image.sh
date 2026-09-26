@@ -11,8 +11,12 @@ name="$1" tag="$2" context="$3"
   die "name (lowercase) and tag may use letters, digits, '.', '_' and '-'"
 [[ -f "$context/Dockerfile" ]] || die "no Dockerfile in $context"
 
-tmp=$(mktemp -d)
+# Stage on the images filesystem, not /tmp: the tar, the unpacked layers and the
+# .sif together take 2-3x the image size, and the final mv stays atomic.
+mkdir -p "$HPC_IMAGES_ROOT/.build"
+tmp=$(mktemp -d -p "$HPC_IMAGES_ROOT/.build")
 trap 'rm -rf "$tmp"' EXIT
+export APPTAINER_TMPDIR="$tmp"
 podman build -t "localhost/$name:$tag" "$context"
 podman save -o "$tmp/image.tar" "localhost/$name:$tag"
 apptainer build "$tmp/image.sif" "docker-archive:$tmp/image.tar"

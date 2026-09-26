@@ -6228,6 +6228,7 @@ describe("doc/hpc company package", () => {
     const trigger = (slug: string) => routines.find((issue) => issue.slug === slug)?.routine?.triggers[0];
     expect(trigger("hpc-daily-digest")).toMatchObject({ kind: "schedule", cronExpression: "0 13 * * *", timezone: "UTC" });
     expect(trigger("hpc-weekly-maintenance")).toMatchObject({ kind: "schedule", cronExpression: "0 12 * * 1", timezone: "UTC" });
+    expect(routines.map((issue) => issue.routine?.concurrencyPolicy)).toEqual(["skip_if_active", "skip_if_active"]);
     expect(preview.errors).toEqual([]);
     expect(preview.warnings).toEqual([]);
   });
