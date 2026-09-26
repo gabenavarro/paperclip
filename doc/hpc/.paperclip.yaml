@@ -1,2 +1,37 @@
 schema: paperclip/v1
 schemaVersion: 7
+agents:
+  hpc-pipeline-engineer:
+    adapter:
+      type: claude_local
+      config:
+        engine: cli
+    runtime:
+      heartbeat:
+        enabled: false
+        maxDailyRuns: 48
+  ml-environment-engineer:
+    adapter:
+      type: claude_local
+      config:
+        engine: cli
+    runtime:
+      heartbeat:
+        enabled: false
+        maxDailyRuns: 48
+projects:
+  hpc:
+    leadAgentSlug: hpc-pipeline-engineer
+routines:
+  hpc-daily-digest:
+    concurrencyPolicy: skip_if_active
+    triggers:
+      - kind: schedule
+        cronExpression: "0 13 * * *"
+        timezone: UTC
+  hpc-weekly-maintenance:
+    concurrencyPolicy: skip_if_active
+    triggers:
+      - kind: schedule
+        cronExpression: "0 12 * * 1"
+        timezone: UTC

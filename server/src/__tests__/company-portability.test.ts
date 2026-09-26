@@ -6204,4 +6204,31 @@ describe("doc/hpc company package", () => {
     expect(scripts("hpc-ml-images")).toEqual(["hpc-build-image.sh"]);
     expect(preview.errors).toEqual([]);
   });
+
+  it("defines the two agents and two routines with the settings the spec requires", async () => {
+    const preview = await previewPackage();
+    const agents = Object.fromEntries(preview.manifest.agents.map((agent) => [agent.slug, agent]));
+
+    expect(Object.keys(agents).sort()).toEqual(["hpc-pipeline-engineer", "ml-environment-engineer"]);
+    for (const agent of Object.values(agents)) {
+      expect(agent.role).toBe("devops");
+      expect(agent.adapterType).toBe("claude_local");
+      expect(agent.adapterConfig).toMatchObject({ engine: "cli" });
+      expect(agent.runtimeConfig).toMatchObject({ heartbeat: { maxDailyRuns: 48 } });
+    }
+    expect(agents["hpc-pipeline-engineer"].skills.sort()).toEqual(["hpc-jobs", "hpc-nf-core"]);
+    expect(agents["ml-environment-engineer"].skills.sort()).toEqual(["hpc-jobs", "hpc-ml-images"]);
+    expect(preview.manifest.projects[0].leadAgentSlug).toBe("hpc-pipeline-engineer");
+
+    const routines = preview.manifest.issues.filter((issue) => issue.recurring);
+    expect(routines.map((issue) => [issue.slug, issue.assigneeAgentSlug, issue.projectSlug]).sort()).toEqual([
+      ["hpc-daily-digest", "hpc-pipeline-engineer", "hpc"],
+      ["hpc-weekly-maintenance", "ml-environment-engineer", "hpc"],
+    ]);
+    const trigger = (slug: string) => routines.find((issue) => issue.slug === slug)?.routine?.triggers[0];
+    expect(trigger("hpc-daily-digest")).toMatchObject({ kind: "schedule", cronExpression: "0 13 * * *", timezone: "UTC" });
+    expect(trigger("hpc-weekly-maintenance")).toMatchObject({ kind: "schedule", cronExpression: "0 12 * * 1", timezone: "UTC" });
+    expect(preview.errors).toEqual([]);
+    expect(preview.warnings).toEqual([]);
+  });
 });
