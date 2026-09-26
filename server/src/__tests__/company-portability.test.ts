@@ -6148,3 +6148,38 @@ describe("dedupeImportedCompanyName", () => {
     expect(dedupeImportedCompanyName("Paperclip", ["  Paperclip  "])).toBe("Paperclip (2)");
   });
 });
+
+describe("doc/hpc company package", () => {
+  async function readPackageFiles(): Promise<Record<string, string>> {
+    const root = path.resolve(import.meta.dirname, "../../../doc/hpc");
+    const files: Record<string, string> = {};
+    for (const entry of await fs.readdir(root, { recursive: true, withFileTypes: true })) {
+      if (!entry.isFile()) continue;
+      const absolute = path.join(entry.parentPath, entry.name);
+      files[path.relative(root, absolute).split(path.sep).join("/")] = await fs.readFile(absolute, "utf8");
+    }
+    return files;
+  }
+
+  async function previewPackage() {
+    agentSvc.list.mockResolvedValue([]);
+    projectSvc.list.mockResolvedValue([]);
+    companySkillSvc.listFull.mockResolvedValue([]);
+    companySvc.getById.mockResolvedValue({ id: "company-1", name: "Test Co", issuePrefix: "TST" });
+    return companyPortabilityService({} as any).previewImport({
+      source: { type: "inline", rootPath: "hpc", files: await readPackageFiles() },
+      include: { company: false, agents: true, projects: true, issues: true, skills: true },
+      target: { mode: "existing_company", companyId: "company-1" },
+      agents: "all",
+      collisionStrategy: "skip",
+    });
+  }
+
+  it("previews cleanly as an import into an existing company", async () => {
+    const preview = await previewPackage();
+
+    expect(preview.errors).toEqual([]);
+    expect(preview.warnings).toEqual([]);
+    expect(preview.manifest.projects.map((project) => project.slug)).toEqual(["hpc"]);
+  });
+});
