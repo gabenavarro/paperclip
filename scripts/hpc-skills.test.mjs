@@ -280,3 +280,21 @@ test("hpc-doctor passes on a ready box and fails when podman is not rootless", (
   assert.equal(bad.status, 1);
   assert.match(bad.stdout, /^FAIL podman-rootless/m);
 });
+
+test("hpc-build-image stores a sha-named sif and rejects bad names", () => {
+  const s = sandbox();
+  const context = path.join(s.root, "ctx");
+  mkdirSync(context);
+  writeFileSync(path.join(context, "Dockerfile"), "FROM scratch\n");
+
+  const r = run(path.join(imagesScripts, "hpc-build-image.sh"), ["torch", "2.8-cu128", context], s.env);
+
+  assert.equal(r.status, 0, r.stderr);
+  const built = r.stdout.match(/^image: (.+\/torch\/2\.8-cu128-[0-9a-f]{12}\.sif)$/m);
+  assert.ok(built, r.stdout);
+  assert.ok(existsSync(built[1]));
+  assert.match(readFileSync(s.log, "utf8"), /podman build -t localhost\/torch:2\.8-cu128/);
+
+  const bad = run(path.join(imagesScripts, "hpc-build-image.sh"), ["Bad Name", "x", context], s.env);
+  assert.equal(bad.status, 2);
+});
