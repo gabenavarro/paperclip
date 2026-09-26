@@ -496,10 +496,56 @@ describe("ssh env-lab fixture", () => {
       `PAPERCLIP_API_KEY ${Buffer.from("s3cr3t-token-value", "utf8").toString("base64")}\n\n`,
     );
     const remoteScript = String(target.args.at(-1) ?? "");
-    expect(remoteScript).toContain("base64 -d");
+    // base64 is resolved once into a variable up front (see below) and
+    // invoked through it, rather than by bare name in the decode step.
+    expect(remoteScript).toContain('"$__pc_b" -d');
     expect(remoteScript).not.toContain("exec env ");
+    // Fail closed: a profile's xtrace must not print exported secrets, and
+    // base64 must be resolved once up front so a later PATH export can't
+    // break the decode.
+    expect(remoteScript).toContain("set +x");
+    expect(remoteScript).toContain("command -v base64");
     await target.cleanup();
   });
+
+  it("fails closed when the env block's stdin ends before the empty terminator line", async () => {
+    const rootDir = await createFixtureRootDir();
+    const statePath = path.join(rootDir, "state.json");
+    const started = await startSshEnvLabFixtureOrSkip(statePath, "SSH env fail-closed test");
+    if (!started) return;
+    const config = await buildSshEnvLabFixtureConfig(started);
+
+    const target = await buildSshSpawnTarget({
+      spec: { ...config, remoteCwd: started.workspaceDir },
+      command: "sh",
+      args: ["-c", "echo ran"],
+      env: { A: "1" },
+    });
+
+    try {
+      // Drop the trailing "\n" so the stream ends right after the one KEY
+      // line, never sending the empty terminator line the read loop waits for.
+      const truncatedStdin = target.stdinPrefix.slice(0, -1);
+      const { exitCode, stdout } = await new Promise<{ exitCode: number | null; stdout: string }>(
+        (resolve, reject) => {
+          const child = spawn("ssh", target.args, { stdio: ["pipe", "pipe", "pipe"] });
+          let stdout = "";
+          child.stdout.on("data", (chunk) => {
+            stdout += String(chunk);
+          });
+          child.on("error", reject);
+          child.stdin.on("error", () => {});
+          child.stdin.end(truncatedStdin);
+          child.on("close", (code) => resolve({ exitCode: code, stdout }));
+        },
+      );
+
+      expect(stdout).not.toContain("ran");
+      expect(exitCode).toBe(97);
+    } finally {
+      await target.cleanup();
+    }
+  }, SSH_FIXTURE_TEST_TIMEOUT_MS);
 
   it("builds a remote script that sources login profiles but no nvm", async () => {
     const target = await buildSshSpawnTarget({

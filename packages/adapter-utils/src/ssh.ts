@@ -166,9 +166,16 @@ const LOGIN_PROFILE_SCRIPT = [
 // variable, then an empty line. `read` takes a pipe one byte at a time, so the
 // command after the loop still gets the rest of stdin unchanged. The `x`
 // sentinel keeps trailing newlines that `$(...)` would strip. Exit 97 means a
-// value did not decode (for example, no `base64` on the host).
+// value did not decode (for example, no `base64` on the host) or stdin hit EOF
+// before the empty terminator line — fail closed instead of silently running
+// the command with a truncated env. `set +x` stops a profile's xtrace from
+// printing `export K=<secret>` into logs. `base64` is resolved once into
+// `__pc_b` before the loop runs, so a value that exports its own `PATH`
+// mid-loop cannot break a later decode. The braces make the whole sequence one
+// element of the outer `&&` chain, so its internal `;`/`||` cannot break that
+// chaining.
 const READ_ENV_FROM_STDIN =
-  'while IFS= read -r __pc_l && [ -n "$__pc_l" ]; do __pc_v=$(printf %s "${__pc_l#* }" | base64 -d && printf x) || exit 97; export "${__pc_l%% *}=${__pc_v%x}"; done';
+  '{ set +x; __pc_b=$(command -v base64) || exit 97; while IFS= read -r __pc_l || exit 97; [ -n "$__pc_l" ]; do __pc_v=$(printf %s "${__pc_l#* }" | "$__pc_b" -d && printf x) || exit 97; export "${__pc_l%% *}=${__pc_v%x}"; done; }';
 
 function encodeSshEnvStdin(env: Record<string, string | undefined> | undefined): string {
   const lines = Object.entries(env ?? {}).flatMap(([key, value]) => {
