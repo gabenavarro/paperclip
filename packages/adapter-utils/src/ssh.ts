@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import { constants as fsConstants, createReadStream, createWriteStream, promises as fs } from "node:fs";
 import net from "node:net";
@@ -406,8 +406,11 @@ async function withTempFile(
 }
 
 // One private directory per server process for ssh control sockets (mkdtemp
-// creates it 0700). `%C` hashes host, port and user, so each target gets one
-// master connection that every later command reuses.
+// creates it 0700). Each socket inside it is named by a digest of everything
+// that affects authentication (see createSshAuthArgs), so each distinct
+// target/credential pair gets one master connection that every later command
+// for that pair reuses — and two configs that share a host/port/user but
+// differ in key material or host-key pinning can never ride the same master.
 let sshControlDirPath: string | undefined;
 
 async function sshControlDir(): Promise<string> {
@@ -416,9 +419,28 @@ async function sshControlDir(): Promise<string> {
 }
 
 async function createSshAuthArgs(
-  config: Pick<SshConnectionConfig, "privateKey" | "knownHosts" | "strictHostKeyChecking">,
+  config: SshConnectionConfig,
 ): Promise<{ args: string[]; cleanup: () => Promise<void> }> {
   const tempFiles: Array<() => Promise<void>> = [];
+  // `%C` only hashes host, port and user, which (a) can make the socket path
+  // exceed the 104-byte Unix-socket limit on macOS once ssh appends its own
+  // `.<16 random chars>` suffix, and (b) lets a second config that shares a
+  // host/port/user but differs in key material or host-key pinning reuse the
+  // first config's live master. Name the socket ourselves from a digest of
+  // everything that affects authentication instead.
+  const socketName = createHash("sha256")
+    .update(
+      JSON.stringify([
+        config.host,
+        config.port,
+        config.username,
+        config.privateKey,
+        config.knownHosts,
+        config.strictHostKeyChecking,
+      ]),
+    )
+    .digest("hex")
+    .slice(0, 16);
   const sshArgs = [
     "-o",
     "BatchMode=yes",
@@ -431,7 +453,7 @@ async function createSshAuthArgs(
     "-o",
     "ControlMaster=auto",
     "-o",
-    `ControlPath=${path.join(await sshControlDir(), "%C")}`,
+    `ControlPath=${path.join(await sshControlDir(), socketName)}`,
     "-o",
     "ControlPersist=120",
     "-o",

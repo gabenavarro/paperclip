@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import {
+  buildKnownHostsEntry,
   buildSshSpawnTarget,
   buildSshEnvLabFixtureConfig,
   createSshCommandManagedRuntimeRunner,
@@ -545,6 +546,55 @@ describe("ssh env-lab fixture", () => {
     } finally {
       await target.cleanup();
     }
+  }, SSH_FIXTURE_TEST_TIMEOUT_MS);
+
+  it("names the ControlMaster socket by a digest of the connection credentials", async () => {
+    const target = await buildSshSpawnTarget({
+      spec: {
+        host: "ssh.example.test",
+        port: 22,
+        username: "ssh-user",
+        remoteCwd: "/srv/paperclip/workspace",
+        remoteWorkspacePath: "/srv/paperclip/workspace",
+        privateKey: null,
+        knownHosts: null,
+        strictHostKeyChecking: true,
+      },
+      command: "node",
+      args: ["--version"],
+      env: {},
+    });
+
+    try {
+      const controlPathArg = target.args.find((arg) => arg.startsWith("ControlPath="));
+      expect(controlPathArg).toBeDefined();
+      const socketName = path.basename(controlPathArg!.slice("ControlPath=".length));
+      expect(socketName).toMatch(/^[0-9a-f]{16}$/);
+    } finally {
+      await target.cleanup();
+    }
+  });
+
+  it("keys the ControlMaster socket by more than host/port/user, so a mismatched known_hosts cannot ride another config's master", async () => {
+    const rootDir = await createFixtureRootDir();
+    const statePath = path.join(rootDir, "state.json");
+    const started = await startSshEnvLabFixtureOrSkip(statePath, "SSH ControlMaster credential-keying test");
+    if (!started) return;
+    const config = await buildSshEnvLabFixtureConfig(started);
+
+    // Starts (and leaves running) a ControlMaster for this host/port/user.
+    await runSshCommand(config, "true", { timeoutMs: 30_000 });
+
+    // Same host/port/user, but pinned to the wrong host key (the fixture's
+    // CLIENT key, never the host's), so strict host key checking must reject
+    // it — unless this second config wrongly rides the first master.
+    const clientPublicKey = await readFile(started.clientPublicKeyPath, "utf8");
+    const mismatchedConfig = {
+      ...config,
+      knownHosts: buildKnownHostsEntry({ host: config.host, port: config.port, publicKey: clientPublicKey }),
+    };
+
+    await expect(runSshCommand(mismatchedConfig, "true", { timeoutMs: 30_000 })).rejects.toThrow();
   }, SSH_FIXTURE_TEST_TIMEOUT_MS);
 
   it("builds a remote script that sources login profiles but no nvm", async () => {
