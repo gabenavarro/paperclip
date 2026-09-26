@@ -96,6 +96,8 @@ interface SpawnTarget {
   args: string[];
   cwd?: string;
   env?: Record<string, string | undefined>;
+  /** Written to stdin before the caller's own input (the SSH env block). */
+  stdinPrefix?: string;
   cleanup?: () => Promise<void>;
 }
 
@@ -3542,6 +3544,7 @@ async function resolveSpawnTarget(
       command: sshResolved,
       args: spawnTarget.args,
       cwd: process.cwd(),
+      stdinPrefix: spawnTarget.stdinPrefix,
       cleanup: spawnTarget.cleanup,
     };
   }
@@ -4633,12 +4636,14 @@ export async function runChildProcess(
         for (const [key, value] of Object.entries(childEnv)) {
           if (value === undefined) delete childEnv[key];
         }
+        const stdinText =
+          target.stdinPrefix || opts.stdin != null ? `${target.stdinPrefix ?? ""}${opts.stdin ?? ""}` : null;
         const child = spawn(target.command, target.args, {
           cwd: target.cwd ?? opts.cwd,
           env: childEnv,
           detached: process.platform !== "win32",
           shell: false,
-          stdio: [opts.stdin != null ? "pipe" : "ignore", "pipe", "pipe"],
+          stdio: [stdinText != null ? "pipe" : "ignore", "pipe", "pipe"],
         }) as ChildProcessWithEvents;
         const startedAt = new Date().toISOString();
         const processGroupId = resolveProcessGroupId(child);
@@ -4792,10 +4797,10 @@ export async function runChildProcess(
         });
 
         const stdin = child.stdin;
-        if (opts.stdin != null && stdin) {
+        if (stdinText != null && stdin) {
           void spawnPersistPromise.finally(() => {
             if (child.killed || stdin.destroyed) return;
-            stdin.write(opts.stdin as string);
+            stdin.write(stdinText);
             stdin.end();
           });
         }
