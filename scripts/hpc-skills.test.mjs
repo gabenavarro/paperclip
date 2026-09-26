@@ -181,3 +181,78 @@ test("hpc-submit runs a host command from the job directory, and --checkpoint re
   assert.match(ckptBody, /apptainer exec .*&\nchild=\$!/);
   assert.match(readFileSync(s.log, "utf8"), /--signal B:USR1@300 --requeue/);
 });
+
+const DONE_LINE =
+  "JobId=4100 UserId=paperclip(1001) Name=done JobState=COMPLETED Partition=all StartTime=2026-09-26T08:00:00 EndTime=2026-09-26T10:00:00 NodeList=hpc1 Tres=cpu=16,mem=64G,node=1,gres/gpu=1 ExitCode=0:0 DerivedExitCode=0:0\n";
+
+test("hpc-status reports active and finished jobs and reschedules only while one is active", () => {
+  const s = sandbox();
+  writeFileSync(s.env.HPC_JOBCOMP_LOG, DONE_LINE);
+
+  const active = run(path.join(jobsScripts, "hpc-status.sh"), ["--next-check", "30", "4242", "4100", "9999"], {
+    ...s.env,
+    ...apiEnv,
+    FAKE_ISSUE_JSON: ISSUE,
+    FAKE_SQUEUE: "4242 RUNNING elapsed=1:02:03 gres=gres/gpu:1 reason=None",
+  });
+
+  assert.equal(active.status, 0, active.stderr);
+  assert.match(active.stdout, /^4242 RUNNING elapsed=1:02:03/m);
+  assert.match(
+    active.stdout,
+    /^4100 COMPLETED exit=0:0 start=2026-09-26T08:00:00 end=2026-09-26T10:00:00 tres=cpu=16,mem=64G,node=1,gres\/gpu=1$/m,
+  );
+  assert.match(active.stdout, /^9999 UNKNOWN/m);
+  assert.match(readFileSync(s.log, "utf8"), /^PATCH /m);
+
+  writeFileSync(s.log, "");
+  const done = run(path.join(jobsScripts, "hpc-status.sh"), ["4100"], { ...s.env, ...apiEnv, FAKE_ISSUE_JSON: ISSUE });
+  assert.equal(done.status, 0, done.stderr);
+  assert.doesNotMatch(readFileSync(s.log, "utf8"), /PATCH/);
+});
+
+test("hpc-diagnose maps out-of-memory and CUDA arch failures to fixes", () => {
+  const s = sandbox();
+  const job = path.join(s.env.HPC_JOBS_ROOT, "ISS-2", "fit");
+  mkdirSync(path.join(job, "logs"), { recursive: true });
+  writeFileSync(
+    path.join(job, "logs", "4300.out"),
+    "RuntimeError: CUDA error: no kernel image is available for execution on the device\n",
+  );
+  writeFileSync(
+    s.env.HPC_JOBCOMP_LOG,
+    "JobId=4300 JobState=OUT_OF_MEMORY StartTime=2026-09-26T08:00:00 EndTime=2026-09-26T08:05:00 Tres=cpu=16,gres/gpu=1 ExitCode=0:125\n",
+  );
+
+  const r = run(path.join(jobsScripts, "hpc-diagnose.sh"), ["4300", job], s.env);
+
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /cause: the job used more memory than --mem/);
+  assert.match(r.stdout, /cause: the image's PyTorch\/CUDA build does not support this GPU/);
+});
+
+test("hpc-report-gpu-hours posts one cost event per job", () => {
+  const s = sandbox();
+  const job = path.join(s.env.HPC_JOBS_ROOT, "ISS-3", "train");
+  mkdirSync(path.join(job, "logs"), { recursive: true });
+  writeFileSync(
+    s.env.HPC_JOBCOMP_LOG,
+    "JobId=4400 JobState=COMPLETED StartTime=2026-09-26T08:00:00 EndTime=2026-09-26T10:00:00 Tres=cpu=16,mem=64G,node=1,gres/gpu=2 ExitCode=0:0\n",
+  );
+  const env = { ...s.env, ...apiEnv, HPC_GPU_HOUR_CENTS: "150" };
+
+  const first = run(path.join(jobsScripts, "hpc-report-gpu-hours.sh"), ["4400", job], env);
+  assert.equal(first.status, 0, first.stderr);
+  assert.match(first.stdout, /reported 4\.00 GPU-hours \(600 cents\)/);
+  const post = readFileSync(s.log, "utf8").split("\n").find((line) => line.startsWith("POST "));
+  const body = JSON.parse(post.slice(post.indexOf("{")));
+  assert.equal(body.costCents, 600);
+  assert.equal(body.provider, "hpc");
+  assert.equal(body.costStatus, "reported");
+  assert.equal(body.agentId, apiEnv.PAPERCLIP_AGENT_ID);
+
+  const second = run(path.join(jobsScripts, "hpc-report-gpu-hours.sh"), ["4400", job], env);
+  assert.match(second.stdout, /already reported/);
+  const posts = readFileSync(s.log, "utf8").split("\n").filter((line) => line.startsWith("POST "));
+  assert.equal(posts.length, 1);
+});
