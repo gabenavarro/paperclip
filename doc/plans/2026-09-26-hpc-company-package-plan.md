@@ -32,7 +32,7 @@ These are the five input classes the tests below must pin:
 
 1. An issue that already has review stages keeps them after `hpc-submit.sh` sets its monitor (Task 2, submit test asserts `stages.length`).
 2. A job directory outside `HPC_JOBS_ROOT`, or a rejected `sbatch --test-only`, submits nothing (Task 2, the refuse and rejected tests).
-3. Slurm time limits in every accepted form: `MM`, `MM:SS`, `HH:MM:SS`, `D-HH`, `D-HH:MM` (Task 2, time test).
+3. A non-numeric `--time` (the script takes whole minutes) is refused before anything is submitted (Task 2, refuse test).
 4. Running `hpc-report-gpu-hours.sh` twice for the same job posts one cost event (Task 3, report test).
 5. Package YAML that the hand-written parser silently skips must fail the preview test. It asserts exact adapter, runtime, skill-file and routine values, not just "no errors" (Tasks 1 and 7).
 
@@ -154,7 +154,6 @@ git commit -m "feat(hpc): company package skeleton with an import-preview test"
 - Produces, from `lib.sh`:
   - `die MESSAGE`: exits 2.
   - `iso_in SECONDS`: prints a UTC ISO time.
-  - `slurm_time_to_seconds T`.
   - `field KEY LINE`: prints the value of `KEY=value`.
   - `job_line JOBID`: prints `<id> <STATE> <details>`.
   - `api_request METHOD PATH [BODY]`.
@@ -261,16 +260,6 @@ const ISSUE = JSON.stringify({
   executionPolicy: { mode: "normal", commentRequired: true, stages: [{ type: "review", participants: [] }] },
 });
 
-test("slurm_time_to_seconds parses every Slurm time-limit form", () => {
-  const lib = JSON.stringify(path.join(jobsScripts, "lib.sh"));
-  const out = spawnSync(
-    "bash",
-    ["-c", `. ${lib}; for t in 24:00:00 1-00:00 90 30:00 2-12; do slurm_time_to_seconds "$t"; done`],
-    { encoding: "utf8" },
-  );
-  assert.equal(out.stdout, "86400\n86400\n5400\n1800\n216000\n", out.stderr);
-});
-
 test("hpc-submit validates, submits, and merges the monitor into the issue policy", () => {
   const s = sandbox();
   const job = path.join(s.env.HPC_JOBS_ROOT, "ISS-1", "train");
@@ -302,13 +291,18 @@ test("hpc-submit validates, submits, and merges the monitor into the issue polic
   assert.ok(sent.executionPolicy.monitor.timeoutAt);
 });
 
-test("hpc-submit refuses a job directory outside HPC_JOBS_ROOT", () => {
+test("hpc-submit refuses a job directory outside HPC_JOBS_ROOT and a non-minute --time", () => {
   const s = sandbox();
 
   const r = run(path.join(jobsScripts, "hpc-submit.sh"), ["--job", s.root, "--image", s.image, "--", "true"], s.env);
-
   assert.equal(r.status, 2);
   assert.match(r.stderr, /must be under/);
+
+  const job = path.join(s.env.HPC_JOBS_ROOT, "ISS-1", "t");
+  mkdirSync(job, { recursive: true });
+  const badTime = run(path.join(jobsScripts, "hpc-submit.sh"), ["--job", job, "--time", "24:00:00", "--", "true"], s.env);
+  assert.equal(badTime.status, 2);
+  assert.match(badTime.stderr, /--time takes minutes/);
   assert.equal(readFileSync(s.log, "utf8"), "");
 });
 
@@ -356,7 +350,7 @@ test("hpc-submit runs a host command from the job directory, and --checkpoint re
 - [ ] **Step 2: Run them and see them fail.**
 
 Run: `node --test scripts/hpc-skills.test.mjs`
-Expected: all 5 FAIL, because `lib.sh` and `hpc-submit.sh` do not exist (`bash: …/hpc-submit.sh: No such file or directory`).
+Expected: all 4 FAIL, because `lib.sh` and `hpc-submit.sh` do not exist (`bash: …/hpc-submit.sh: No such file or directory`).
 
 - [ ] **Step 3: Implement.** `doc/hpc/skills/hpc-jobs/scripts/lib.sh`:
 
@@ -370,21 +364,6 @@ HPC_JOBCOMP_LOG="${HPC_JOBCOMP_LOG:-/var/log/slurm/jobcomp.log}"
 die() { printf 'error: %s\n' "$*" >&2; exit 2; }
 
 iso_in() { date -u -d "@$(( $(date -u +%s) + $1 ))" +%Y-%m-%dT%H:%M:%SZ; }
-
-# Slurm time limit (MM, MM:SS, HH:MM:SS, D-HH, D-HH:MM, D-HH:MM:SS) -> seconds.
-slurm_time_to_seconds() {
-  local t="$1" days=0 h=0 m=0 s=0 a b c
-  if [[ "$t" == *-* ]]; then
-    days="${t%%-*}"; t="${t#*-}"
-    IFS=: read -r h m s <<<"$t"
-  else
-    IFS=: read -r a b c <<<"$t"
-    if [[ -n "$c" ]]; then h=$a; m=$b; s=$c
-    elif [[ -n "$b" ]]; then m=$a; s=$b
-    else m=$a; fi
-  fi
-  echo $(( 10#${days:-0} * 86400 + 10#${h:-0} * 3600 + 10#${m:-0} * 60 + 10#${s:-0} ))
-}
 
 # Value of KEY in a line of space-separated KEY=value pairs.
 field() { sed -n "s/.*\b$1=\([^ ]*\).*/\1/p" <<<"$2"; }
@@ -442,11 +421,11 @@ schedule_monitor() {
 # --checkpoint: Slurm sends USR1 to the batch shell 5 minutes before the time
 # limit; the shell forwards it to the job, waits for the checkpoint, requeues.
 # Usage: bash scripts/hpc-submit.sh --job DIR [--image SIF] [--gpus 1] [--cpus 16] [--mem 64G]
-#          [--time 24:00:00] [--name NAME] [--checkpoint] -- COMMAND...
+#          [--time MINUTES (default 1440)] [--checkpoint] -- COMMAND...
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 
-job="" image="" gpus=1 cpus=16 mem=64G time=24:00:00 name="" checkpoint=0
+job="" image="" gpus=1 cpus=16 mem=64G time=1440 checkpoint=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --job) job="$2"; shift 2 ;;
@@ -456,7 +435,6 @@ while [[ $# -gt 0 ]]; do
     --cpus) cpus="$2"; shift 2 ;;
     --mem) mem="$2"; shift 2 ;;
     --time) time="$2"; shift 2 ;;
-    --name) name="$2"; shift 2 ;;
     --) shift; break ;;
     *) die "unknown option: $1" ;;
   esac
@@ -464,6 +442,7 @@ done
 [[ $# -gt 0 ]] || die "missing command after --"
 [[ -n "$job" ]] || die "--job is required"
 [[ "$gpus" =~ ^[0-9]+$ && "$cpus" =~ ^[0-9]+$ ]] || die "--gpus and --cpus take whole numbers"
+[[ "$time" =~ ^[0-9]+$ ]] || die "--time takes minutes (1440 = 24 h)"
 job=$(realpath -m "$job")
 [[ "$job" == "$HPC_JOBS_ROOT"/* ]] || die "job directory must be under $HPC_JOBS_ROOT"
 [[ -z "$image" || -f "$image" ]] || die "image not found: $image"
@@ -487,7 +466,7 @@ script="$job/logs/submit-$(date -u +%Y%m%dT%H%M%SZ).sbatch"
   fi
 } >"$script"
 
-args=(--job-name "${name:-$(basename "$job")}" --cpus-per-task "$cpus" --mem "$mem" --time "$time"
+args=(--job-name "$(basename "$job")" --cpus-per-task "$cpus" --mem "$mem" --time "$time"
   --output "$job/logs/%j.out")
 [[ "$gpus" -gt 0 ]] && args+=(--gres "gpu:$gpus")
 [[ $checkpoint -eq 1 ]] && args+=(--signal "B:USR1@300" --requeue)
@@ -499,7 +478,7 @@ jobid=$(sbatch --parsable "${args[@]}" "$script")
 jobid="${jobid%%;*}"
 printf 'submitted %s (script: %s, log: %s/logs/%s.out)\n' "$jobid" "$script" "$job" "$jobid"
 # A checkpointed job requeues itself, so it has no fixed end: no monitor timeout.
-timeout=$(( $(slurm_time_to_seconds "$time") + 1800 ))
+timeout=$(( time * 60 + 1800 ))
 [[ $checkpoint -eq 1 ]] && timeout=""
 schedule_monitor 15 "slurm job $jobid in $job" "$timeout"
 ```
@@ -507,7 +486,7 @@ schedule_monitor 15 "slurm job $jobid in $job" "$timeout"
 - [ ] **Step 4: Run them and see them pass.** Add the script to `package.json` first.
 
 Run: `node --test scripts/hpc-skills.test.mjs`
-Expected: 5/5 PASS.
+Expected: 4/4 PASS.
 
 - [ ] **Step 5: Commit.**
 
@@ -713,7 +692,7 @@ printf 'reported %s GPU-hours (%s cents) for job %s\n' "$hours" "$cents" "$id"
 - [ ] **Step 4: Run them and see them pass.**
 
 Run: `node --test scripts/hpc-skills.test.mjs`
-Expected: 8/8 PASS.
+Expected: 7/7 PASS.
 
 - [ ] **Step 5: Commit.**
 
@@ -804,7 +783,7 @@ printf 'all checks passed\n'
 - [ ] **Step 4: Run it and see it pass.**
 
 Run: `node --test scripts/hpc-skills.test.mjs`
-Expected: 9/9 PASS.
+Expected: 8/8 PASS.
 
 - [ ] **Step 5: Commit.**
 
@@ -931,7 +910,7 @@ The arch list must include the GPU's `sm_XY`. Put the image path, its labels and
 - [ ] **Step 4: Run it and see it pass.**
 
 Run: `node --test scripts/hpc-skills.test.mjs`
-Expected: 10/10 PASS.
+Expected: 9/9 PASS.
 
 - [ ] **Step 5: Commit.**
 
@@ -1010,7 +989,7 @@ You work on the HPC head node through Paperclip's ssh environment. Heavy work ne
 ## Submit a container job
 
 ```bash
-bash scripts/hpc-submit.sh --job /data/jobs/<issue>/<job> --image <sif> [--gpus 1] [--cpus 16] [--mem 64G] [--time 24:00:00] -- python /work/code/train.py
+bash scripts/hpc-submit.sh --job /data/jobs/<issue>/<job> --image <sif> [--gpus 1] [--cpus 16] [--mem 64G] [--time 1440] -- python /work/code/train.py
 ```
 
 - **Inside the container:** the job directory is `/work`, and reference data is `/refs`. The container starts with a clean environment, so keep configuration in files under `/work`.
@@ -1019,7 +998,7 @@ bash scripts/hpc-submit.sh --job /data/jobs/<issue>/<job> --image <sif> [--gpus 
   - checks the job with `sbatch --test-only`;
   - writes the batch script to `logs/submit-<time>.sbatch`;
   - submits it;
-  - sets the issue monitor, with the first check in 15 minutes and a timeout of the job's `--time` plus 30 minutes.
+  - sets the issue monitor, with the first check in 15 minutes and a timeout of the job's `--time` (in minutes) plus 30 minutes.
 - **After it runs:**
   - Confirm that its output says `monitor: next check <time>`.
   - Comment on the issue with what the job does, why, and the `.sbatch` path, which reproduces it.
@@ -1084,7 +1063,7 @@ Pipelines run with open-source Nextflow. Tasks run on Slurm in Apptainer contain
 3. Submit the Nextflow head job with the hpc-jobs skill, so it survives your heartbeat:
 
 ```bash
-bash scripts/hpc-submit.sh --job /data/jobs/<issue>/<run> --gpus 0 --cpus 2 --mem 8G --time 3-00:00:00 -- \
+bash scripts/hpc-submit.sh --job /data/jobs/<issue>/<run> --gpus 0 --cpus 2 --mem 8G --time 4320 -- \
   nextflow run nf-core/<name> -r <release> -profile apptainer -c /etc/paperclip-hpc/nextflow.config \
   --input samplesheet.csv --outdir outputs -work-dir work -resume -with-trace -with-report
 ```
@@ -1405,7 +1384,7 @@ git commit -m "docs(hpc): setup guide for HPC agents"
 - [ ] **Step 1: Run the package and helper tests.**
 
 Run: `node --test scripts/hpc-skills.test.mjs && npx vitest run server/src/__tests__/company-portability.test.ts`
-Expected: 10/10 helper tests PASS, and the whole portability file PASSES.
+Expected: 9/9 helper tests PASS, and the whole portability file PASSES.
 
 - [ ] **Step 2: Lint the scripts.**
 
@@ -1426,7 +1405,7 @@ Expected: no findings. If `shellcheck` is missing, say so in the PR.
   - Parts 2–3 (connection, runbook): Task 8 guide.
   - Part 1: Plan A.
 - **Type consistency:**
-  - `lib.sh` function names (`job_line`, `field`, `schedule_monitor`, `api_request`, `slurm_time_to_seconds`, `iso_in`, `die`) match across Tasks 2–4.
+  - `lib.sh` function names (`job_line`, `field`, `schedule_monitor`, `api_request`, `iso_in`, `die`) match across Tasks 2–4.
   - The harness names (`sandbox`, `run`, `apiEnv`, `ISSUE`, `jobsScripts`, `imagesScripts`) match across Tasks 2–5.
   - `previewPackage` is shared by Tasks 1, 6 and 7.
 - **Known ceiling:** `hpc-report-gpu-hours.sh` reads times from the completion log in the box's local time zone, so start and end use the same zone.
