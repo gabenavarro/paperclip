@@ -4798,10 +4798,7 @@ export async function runChildProcess(
 
         const stdin = child.stdin;
         if (stdinText != null && stdin) {
-          // A child that exits before reading its stdin turns this write into
-          // an EPIPE. Without a listener, that surfaces as an unhandled
-          // 'error' event and crashes the process; the child's close handler
-          // below already reports the failure via exitCode/stderr.
+          // Without a listener, an EPIPE (the child exited first) crashes the server; the close handler reports it.
           stdin.on("error", () => {});
           void spawnPersistPromise.finally(() => {
             if (child.killed || stdin.destroyed) return;

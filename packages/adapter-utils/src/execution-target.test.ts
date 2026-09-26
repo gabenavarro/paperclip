@@ -15,27 +15,27 @@ import {
   throwIfShellCommandTimedOut,
 } from "./execution-target.js";
 
+const SSH_TARGET = {
+  kind: "remote" as const,
+  transport: "ssh" as const,
+  remoteCwd: "/srv/paperclip/workspace",
+  spec: {
+    host: "ssh.example.test",
+    port: 22,
+    username: "ssh-user",
+    remoteCwd: "/srv/paperclip/workspace",
+    remoteWorkspacePath: "/srv/paperclip/workspace",
+    privateKey: null,
+    knownHosts: null,
+    strictHostKeyChecking: true,
+  },
+};
+
 describe("runAdapterExecutionTargetShellCommand", () => {
   afterEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
   });
-
-  const SSH_TARGET = {
-    kind: "remote" as const,
-    transport: "ssh" as const,
-    remoteCwd: "/srv/paperclip/workspace",
-    spec: {
-      host: "ssh.example.test",
-      port: 22,
-      username: "ssh-user",
-      remoteCwd: "/srv/paperclip/workspace",
-      remoteWorkspacePath: "/srv/paperclip/workspace",
-      privateKey: null,
-      knownHosts: null,
-      strictHostKeyChecking: true,
-    },
-  };
 
   it("quotes remote shell commands with the shared SSH quoting helper", async () => {
     const runSshCommandSpy = vi.spyOn(ssh, "runSshCommand").mockResolvedValue({
@@ -282,22 +282,6 @@ describe("readAdapterExecutionTargetHomeDir", () => {
   afterEach(() => {
     vi.restoreAllMocks();
   });
-
-  const SSH_TARGET = {
-    kind: "remote" as const,
-    transport: "ssh" as const,
-    remoteCwd: "/srv/paperclip/workspace",
-    spec: {
-      host: "ssh.example.test",
-      port: 22,
-      username: "ssh-user",
-      remoteCwd: "/srv/paperclip/workspace",
-      remoteWorkspacePath: "/srv/paperclip/workspace",
-      privateKey: null,
-      knownHosts: null,
-      strictHostKeyChecking: true,
-    },
-  };
 
   it("throws when the remote home-directory probe times out, instead of resolving null", async () => {
     vi.spyOn(ssh, "runSshCommand").mockRejectedValue(

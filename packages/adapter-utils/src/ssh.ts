@@ -153,8 +153,12 @@ function isValidShellEnvKey(value: string) {
   return /^[A-Za-z_][A-Za-z0-9_]*$/.test(value);
 }
 
-// Login profiles run with stdin from /dev/null, so a profile that reads stdin
-// cannot eat the env block or the command's own input.
+// The SSH target is an operator-configured host, not a sandbox image, so it can
+// expose `node` or an agent CLI only through a login profile. `/etc/profile`
+// comes first for hosts that set PATH in `/etc/profile.d`; `.bashrc` runs only
+// when there is no `.bash_profile`, which usually sources it. Profiles read
+// stdin from /dev/null, so they cannot eat the env block or the command's own
+// input. The env block is exported after them, so its values win.
 const LOGIN_PROFILE_SCRIPT = [
   'if [ -f /etc/profile ]; then . /etc/profile </dev/null >/dev/null 2>&1 || true; fi',
   'if [ -f "$HOME/.profile" ]; then . "$HOME/.profile" </dev/null >/dev/null 2>&1 || true; fi',
@@ -350,10 +354,7 @@ async function spawnText(
     });
 
     if (options.stdin != null && child.stdin) {
-      // A child that exits before reading its stdin turns this write into an
-      // EPIPE. Without a listener, that surfaces as an unhandled 'error'
-      // event and crashes the process; the close handler above already
-      // reports the failure.
+      // Without a listener, an EPIPE (the child exited first) crashes the server; the close handler reports it.
       child.stdin.on("error", () => {});
       child.stdin.end(options.stdin);
     }
@@ -405,12 +406,8 @@ async function withTempFile(
   };
 }
 
-// One private directory per server process for ssh control sockets (mkdtemp
-// creates it 0700). Each socket inside it is named by a digest of everything
-// that affects authentication (see createSshAuthArgs), so each distinct
-// target/credential pair gets one master connection that every later command
-// for that pair reuses — and two configs that share a host/port/user but
-// differ in key material or host-key pinning can never ride the same master.
+// One private (0700) directory per server process for ssh control sockets;
+// createSshAuthArgs names each socket by a digest of its credentials.
 let sshControlDirPath: string | undefined;
 
 async function sshControlDir(): Promise<string> {
@@ -439,16 +436,7 @@ async function createSshAuthArgs(
   // first config's live master. Name the socket ourselves from a digest of
   // everything that affects authentication instead.
   const socketName = createHash("sha256")
-    .update(
-      JSON.stringify([
-        config.host,
-        config.port,
-        config.username,
-        config.privateKey,
-        config.knownHosts,
-        config.strictHostKeyChecking,
-      ]),
-    )
+    .update(JSON.stringify([config.host, config.port, config.username, config.privateKey, config.knownHosts, config.strictHostKeyChecking]))
     .digest("hex")
     .slice(0, 16);
   const sshArgs = [
@@ -772,10 +760,7 @@ async function streamLocalFileToSsh(input: {
     });
     source.on("error", fail);
     ssh.on("error", fail);
-    // A remote script that exits before reading the piped file turns the
-    // write into an EPIPE. Without a listener, that surfaces as an unhandled
-    // 'error' event and crashes the process; ssh's own close handler below
-    // already reports the failure.
+    // Without a listener, an EPIPE (the remote script exited first) crashes the server; ssh's close handler reports it.
     ssh.stdin?.on("error", () => {});
     if (input.progress) {
       input.progress.counter.on("error", fail);
@@ -1298,17 +1283,7 @@ export async function runSshCommand(
     const auth = await createSshAuthArgs(config);
     cleanup = auth.cleanup;
 
-    // Mirror buildSshSpawnTarget: source the login profiles first, then read
-    // exported env from stdin so user-supplied identity overrides win over
-    // anything a profile re-exports. The SSH target is an operator-configured
-    // host, not a Paperclip sandbox image, so it can expose `node` or an agent
-    // CLI only through a login profile; a non-login SSH command would miss
-    // that PATH. Source `/etc/profile` first so a host that exposes the PATH
-    // through `/etc/profile.d` scripts still resolves node and the agent CLI.
-    // The script no longer sources `nvm.sh`; a profile that adds nvm still
-    // runs. .bash_profile typically sources .bashrc itself; only source
-    // .bashrc directly when no .bash_profile exists, so a host that adds nvm
-    // in .bashrc still resolves node without a double-run of the setup.
+    // Login profiles, then the env block from stdin, then the command (see LOGIN_PROFILE_SCRIPT).
     const remoteScript = [
       ...LOGIN_PROFILE_SCRIPT,
       ...(envStdin ? [READ_ENV_FROM_STDIN] : []),
@@ -1351,17 +1326,7 @@ export async function buildSshSpawnTarget(input: {
   const stdinPrefix = encodeSshEnvStdin(input.env);
   const auth = await createSshAuthArgs(input.spec);
   const remoteCommandParts = [shellQuote(input.command), ...input.args.map((arg) => shellQuote(arg))].join(" ");
-  // Source the login profiles first, then read exported env from stdin so
-  // user-supplied identity overrides win over anything a profile re-exports.
-  // The SSH target is an operator-configured host, not a Paperclip sandbox
-  // image, so it can expose `node` or an agent CLI only through a login
-  // profile; a non-login SSH command would miss that PATH. Source
-  // `/etc/profile` first so a host that exposes the PATH through
-  // `/etc/profile.d` scripts still resolves node and the agent CLI. The script
-  // no longer sources `nvm.sh`; a profile that adds nvm still runs.
-  // .bash_profile typically sources .bashrc itself; only source .bashrc
-  // directly when no .bash_profile exists, so a host that adds nvm in
-  // .bashrc still resolves node without a double-run of the setup.
+  // Login profiles, then the env block from stdin, then the command (see LOGIN_PROFILE_SCRIPT).
   const remoteScript = [
     ...LOGIN_PROFILE_SCRIPT,
     ...(stdinPrefix ? [READ_ENV_FROM_STDIN] : []),

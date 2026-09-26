@@ -25,6 +25,17 @@ import { prepareRemoteManagedRuntime } from "./remote-managed-runtime.js";
 import { runChildProcess } from "./server-utils.js";
 
 const SSH_FIXTURE_TEST_TIMEOUT_MS = 30_000;
+// A spec for tests that only build ssh arguments; nothing connects to it.
+const FAKE_SPEC = {
+  host: "ssh.example.test",
+  port: 22,
+  username: "ssh-user",
+  remoteCwd: "/srv/paperclip/workspace",
+  remoteWorkspacePath: "/srv/paperclip/workspace",
+  privateKey: null,
+  knownHosts: null,
+  strictHostKeyChecking: true,
+};
 let sshEnvLabUnsupportedReason: string | null = null;
 
 // One entry per fixture root directory, registered at creation time so
@@ -477,16 +488,7 @@ describe("ssh env-lab fixture", () => {
 
   it("keeps env values out of the ssh argv and sends them on stdin", async () => {
     const target = await buildSshSpawnTarget({
-      spec: {
-        host: "ssh.example.test",
-        port: 22,
-        username: "ssh-user",
-        remoteCwd: "/srv/paperclip/workspace",
-        remoteWorkspacePath: "/srv/paperclip/workspace",
-        privateKey: null,
-        knownHosts: null,
-        strictHostKeyChecking: true,
-      },
+      spec: FAKE_SPEC,
       command: "node",
       args: ["--version"],
       env: { PAPERCLIP_API_KEY: "s3cr3t-token-value" },
@@ -497,13 +499,10 @@ describe("ssh env-lab fixture", () => {
       `PAPERCLIP_API_KEY ${Buffer.from("s3cr3t-token-value", "utf8").toString("base64")}\n\n`,
     );
     const remoteScript = String(target.args.at(-1) ?? "");
-    // base64 is resolved once into a variable up front (see below) and
-    // invoked through it, rather than by bare name in the decode step.
+    // base64 is resolved once, so a later PATH export cannot break a decode,
+    // and `set +x` keeps a profile's xtrace from printing the values.
     expect(remoteScript).toContain('"$__pc_b" -d');
     expect(remoteScript).not.toContain("exec env ");
-    // Fail closed: a profile's xtrace must not print exported secrets, and
-    // base64 must be resolved once up front so a later PATH export can't
-    // break the decode.
     expect(remoteScript).toContain("set +x");
     expect(remoteScript).toContain("command -v base64");
     await target.cleanup();
@@ -550,16 +549,7 @@ describe("ssh env-lab fixture", () => {
 
   it("names the ControlMaster socket by a digest of the connection credentials", async () => {
     const target = await buildSshSpawnTarget({
-      spec: {
-        host: "ssh.example.test",
-        port: 22,
-        username: "ssh-user",
-        remoteCwd: "/srv/paperclip/workspace",
-        remoteWorkspacePath: "/srv/paperclip/workspace",
-        privateKey: null,
-        knownHosts: null,
-        strictHostKeyChecking: true,
-      },
+      spec: FAKE_SPEC,
       command: "node",
       args: ["--version"],
       env: {},
@@ -623,18 +613,8 @@ describe("ssh env-lab fixture", () => {
   }, SSH_FIXTURE_TEST_TIMEOUT_MS);
 
   it("stops using a control-socket directory that other users can enter", async () => {
-    const spec = {
-      host: "ssh.example.test",
-      port: 22,
-      username: "ssh-user",
-      remoteCwd: "/srv/paperclip/workspace",
-      remoteWorkspacePath: "/srv/paperclip/workspace",
-      privateKey: null,
-      knownHosts: null,
-      strictHostKeyChecking: true,
-    };
     const controlDirOf = async () => {
-      const target = await buildSshSpawnTarget({ spec, command: "true", args: [], env: {} });
+      const target = await buildSshSpawnTarget({ spec: FAKE_SPEC, command: "true", args: [], env: {} });
       await target.cleanup();
       const controlPathArg = target.args.find((arg) => arg.startsWith("ControlPath="));
       return path.dirname(controlPathArg!.slice("ControlPath=".length));
@@ -686,8 +666,6 @@ describe("ssh env-lab fixture", () => {
     // quotes are escaped. Assert the command still runs: cd, env, and the argv.
     expect(remoteScript).toContain("cd ");
     expect(remoteScript).toContain("/srv/paperclip/workspace");
-    // base64 is resolved once into a variable up front and invoked through
-    // it, rather than by bare name in the decode step.
     expect(remoteScript).toContain('"$__pc_b" -d');
     // Profiles cannot read stdin, so they cannot eat the env block or the prompt.
     expect(remoteScript).toContain("</dev/null");

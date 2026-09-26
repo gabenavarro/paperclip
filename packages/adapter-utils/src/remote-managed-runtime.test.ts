@@ -16,10 +16,7 @@ const {
     stdout: Buffer.from('{"token":"remote"}\n').toString("base64"),
     stderr: "",
   })),
-  // remote-managed-runtime.ts imports shellQuote from ./ssh.js; the mock
-  // factory below must provide every named export it imports or the module
-  // fails to load. Not a vi.fn(): no test asserts on shellQuote calls, only
-  // on the quoted command strings it produces.
+  // remote-managed-runtime.ts imports shellQuote from ./ssh.js, so the mock must provide it.
   shellQuote: (value: string) => `'${value.replace(/'/g, `'"'"'`)}'`,
   syncDirectoryToSsh: vi.fn(async (_input: { localDir: string }) => undefined),
 }));
