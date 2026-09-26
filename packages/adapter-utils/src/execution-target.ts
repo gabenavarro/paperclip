@@ -4814,6 +4814,8 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
       handleRequest: (request, options) => forwardBridgeRequest(request, options?.signal, {
         reservation: options?.reservation,
       }),
+      // Over ssh every poll is a remote command; once a second is enough.
+      pollIntervalMs: target.transport === "ssh" ? 1_000 : undefined,
     });
     server = await startSandboxCallbackBridgeServer({
       runner,
