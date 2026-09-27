@@ -41,6 +41,7 @@ Paperclip supports three deployment configurations, from zero-friction local to 
 - **Just trying Paperclip?** Use `local_trusted` (the default)
 - **Sharing with a team on private network?** Use `authenticated` + `private`
 - **Deploying to the cloud?** Use `authenticated` + `public` — see [AWS ECS Fargate guide](aws-ecs.md) or [Google Cloud Run guide](gcp-cloud-run.md)
+- **Running agents on an on-prem HPC box?** See the [HPC Agents guide](hpc-agents.md): expert agents over the ssh environment
 
 Set the mode during onboarding:
 

@@ -6148,3 +6148,88 @@ describe("dedupeImportedCompanyName", () => {
     expect(dedupeImportedCompanyName("Paperclip", ["  Paperclip  "])).toBe("Paperclip (2)");
   });
 });
+
+describe("doc/hpc company package", () => {
+  async function readPackageFiles(): Promise<Record<string, string>> {
+    const root = path.resolve(import.meta.dirname, "../../../doc/hpc");
+    const files: Record<string, string> = {};
+    for (const entry of await fs.readdir(root, { recursive: true, withFileTypes: true })) {
+      if (!entry.isFile()) continue;
+      const absolute = path.join(entry.parentPath, entry.name);
+      files[path.relative(root, absolute).split(path.sep).join("/")] = await fs.readFile(absolute, "utf8");
+    }
+    return files;
+  }
+
+  async function previewPackage() {
+    agentSvc.list.mockResolvedValue([]);
+    projectSvc.list.mockResolvedValue([]);
+    companySkillSvc.listFull.mockResolvedValue([]);
+    companySvc.getById.mockResolvedValue({ id: "company-1", name: "Test Co", issuePrefix: "TST" });
+    return companyPortabilityService({} as any).previewImport({
+      source: { type: "inline", rootPath: "hpc", files: await readPackageFiles() },
+      include: { company: false, agents: true, projects: true, issues: true, skills: true },
+      target: { mode: "existing_company", companyId: "company-1" },
+      agents: "all",
+      collisionStrategy: "skip",
+    });
+  }
+
+  it("previews cleanly as an import into an existing company", async () => {
+    const preview = await previewPackage();
+
+    expect(preview.errors).toEqual([]);
+    expect(preview.warnings).toEqual([]);
+    expect(preview.manifest.projects.map((project) => project.slug)).toEqual(["hpc"]);
+  });
+
+  it("ships the three skills with the hpc-jobs and hpc-ml-images scripts", async () => {
+    const preview = await previewPackage();
+    const skills = Object.fromEntries(preview.manifest.skills.map((skill) => [skill.slug, skill]));
+
+    expect(Object.keys(skills).sort()).toEqual(["hpc-jobs", "hpc-ml-images", "hpc-nf-core"]);
+    const scripts = (slug: string) =>
+      skills[slug].fileInventory
+        .filter((file) => file.kind === "script")
+        .map((file) => path.posix.basename(file.path))
+        .sort();
+    expect(scripts("hpc-jobs")).toEqual([
+      "hpc-diagnose.sh",
+      "hpc-doctor.sh",
+      "hpc-report-gpu-hours.sh",
+      "hpc-status.sh",
+      "hpc-submit.sh",
+      "lib.sh",
+    ]);
+    expect(scripts("hpc-ml-images")).toEqual(["hpc-build-image.sh"]);
+    expect(preview.errors).toEqual([]);
+  });
+
+  it("defines the two agents and two routines with the settings the spec requires", async () => {
+    const preview = await previewPackage();
+    const agents = Object.fromEntries(preview.manifest.agents.map((agent) => [agent.slug, agent]));
+
+    expect(Object.keys(agents).sort()).toEqual(["hpc-pipeline-engineer", "ml-environment-engineer"]);
+    for (const agent of Object.values(agents)) {
+      expect(agent.role).toBe("devops");
+      expect(agent.adapterType).toBe("claude_local");
+      expect(agent.adapterConfig).toMatchObject({ engine: "cli" });
+      expect(agent.runtimeConfig).toMatchObject({ heartbeat: { maxDailyRuns: 48 } });
+    }
+    expect(agents["hpc-pipeline-engineer"].skills.sort()).toEqual(["hpc-jobs", "hpc-nf-core"]);
+    expect(agents["ml-environment-engineer"].skills.sort()).toEqual(["hpc-jobs", "hpc-ml-images"]);
+    expect(preview.manifest.projects[0].leadAgentSlug).toBe("hpc-pipeline-engineer");
+
+    const routines = preview.manifest.issues.filter((issue) => issue.recurring);
+    expect(routines.map((issue) => [issue.slug, issue.assigneeAgentSlug, issue.projectSlug]).sort()).toEqual([
+      ["hpc-daily-digest", "hpc-pipeline-engineer", "hpc"],
+      ["hpc-weekly-maintenance", "ml-environment-engineer", "hpc"],
+    ]);
+    const trigger = (slug: string) => routines.find((issue) => issue.slug === slug)?.routine?.triggers[0];
+    expect(trigger("hpc-daily-digest")).toMatchObject({ kind: "schedule", cronExpression: "0 13 * * *", timezone: "UTC" });
+    expect(trigger("hpc-weekly-maintenance")).toMatchObject({ kind: "schedule", cronExpression: "0 12 * * 1", timezone: "UTC" });
+    expect(routines.map((issue) => issue.routine?.concurrencyPolicy)).toEqual(["skip_if_active", "skip_if_active"]);
+    expect(preview.errors).toEqual([]);
+    expect(preview.warnings).toEqual([]);
+  });
+});
