@@ -4049,10 +4049,7 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
       let sessionHandle!: AcpRuntimeHandle;
       let childStderrState!: ChildStderrState;
       let processIdentitySink!: AcpxProcessIdentitySink;
-      // Paperclip's own handle on acpx's persisted session store (keyed by
-      // `prepared.sessionKey`). Declared here, alongside `prepared`, so the
-      // settlement `endSession` step — a sibling closure to `startup`, which
-      // assigns this — can also reach it (see `markSessionRecordResetOnDiscard`).
+      // Assigned in startup; endSession also needs it (markSessionRecordResetOnDiscard).
       let persistedRuntimeStore!: AcpSessionStore;
       let resumedSession = false;
       let clearSession = false;
@@ -5333,8 +5330,7 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
               reason: settlement.reason,
               discardPersistentState: settlement.discardPersistentState,
             });
-            // The warm-store close swallows a backend session/close failure the
-            // same way the direct path below does, so mark the record here too.
+            // The warm-store close also swallows a failed session/close.
             if (settlement.discardPersistentState) {
               await markSessionRecordResetOnDiscard(persistedRuntimeStore, prepared.sessionKey);
             }
@@ -5351,9 +5347,7 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
             })
             .then(() => { runtimeStopConfirmed = true; })
             .catch(onCloseError);
-          // Mark the record reset regardless of whether the close above threw
-          // (e.g. an agent without `session/close` support, like Gemini CLI) —
-          // see `markSessionRecordResetOnDiscard`.
+          // Even when the close above failed (see markSessionRecordResetOnDiscard).
           if (settlement.discardPersistentState) {
             await markSessionRecordResetOnDiscard(persistedRuntimeStore, prepared.sessionKey);
           }

@@ -744,21 +744,12 @@ describe("ACP settlement — Layer A: engine teardown orchestration", () => {
   });
 
   it("marks a discarded session record for reset even when the agent cannot close it", async () => {
-    // GitHub issue #12: a Cloud Run redeploy wipes Gemini CLI's own session
-    // files, but acpx's own persisted record survives and still points at the
-    // now-dead ACP session, so the turn fails with
-    // detailCode "SESSION_RESUME_REQUIRED" (sessionUnavailable, execute.ts
-    // ~:4953-4955), which sets discardPersistentState. acpx's real close()
-    // only sets `reset_on_next_ensure` AFTER a successful backend
-    // session/close (runtime.js ~:1302-1315); Gemini CLI does not support
-    // `session/close`, so that close throws ACP_BACKEND_UNSUPPORTED_CONTROL
-    // first and the flag is never saved — the next run resumes the dead
-    // session forever. `endSession` must mark the record reset itself,
-    // independent of the close outcome (`markSessionRecordResetOnDiscard`).
+    // Issue #12: the turn fails with SESSION_RESUME_REQUIRED and close() throws
+    // like Gemini CLI's missing session/close, so acpx never saves its reset
+    // flag. endSession must mark the stored record for reset itself.
     const root = await makeTempRoot();
     const stateDir = path.join(root, "state");
-    // A real acpx session store rooted at the run's own stateDir — the same
-    // store `endSession` reads/writes through `persistedRuntimeStore`.
+    // The real acpx store the engine uses for this stateDir.
     const store = createRuntimeStore({ stateDir });
     let capturedSessionKey: string | undefined;
 
@@ -766,11 +757,7 @@ describe("ACP settlement — Layer A: engine teardown orchestration", () => {
       createRuntime: () =>
         ({
           ensureSession: async (input: { sessionKey: string }) => {
-            // The engine passes its computed `sessionKey` straight through
-            // (execute.ts ~:4382); capture it here rather than reproducing
-            // the engine's fingerprint hash, and use the same call to
-            // pre-seed a persisted record for it — as if a prior run had
-            // already established and saved this persistent ACP session.
+            // Seed a stored record for the engine's session key, as a prior run would have.
             capturedSessionKey = input.sessionKey;
             const now = new Date().toISOString();
             await store.save({
@@ -807,9 +794,7 @@ describe("ACP settlement — Layer A: engine teardown orchestration", () => {
             }),
             cancel: async () => {},
           }),
-          // Gemini CLI does not support `session/close`; acpx's real close()
-          // rejects with this same shape before it ever saves
-          // reset_on_next_ensure.
+          // acpx's close() rejects like this when the agent lacks session/close.
           close: vi.fn(async () => {
             throw new AcpRuntimeError(
               "ACP_BACKEND_UNSUPPORTED_CONTROL",
@@ -832,10 +817,7 @@ describe("ACP settlement — Layer A: engine teardown orchestration", () => {
     expect(result.exitCode).toBe(1);
     expect(capturedSessionKey).toBeTruthy();
 
-    // No warm entry matches (a Cloud Run redeploy starts a fresh process with
-    // an empty in-memory warm-handle map), so this exercises the direct
-    // `runtime.close()` path in `endSession` — the same path a real
-    // post-redeploy run takes.
+    // No warm entry after a restart, so this is the direct runtime.close() path.
     const record = await store.load(capturedSessionKey!);
     expect(record?.acpx?.reset_on_next_ensure).toBe(true);
   });
