@@ -39,6 +39,7 @@ import {
   createAcpxEngineExecutor,
   type AcpxEngineExecutorOptions,
 } from "./execute.js";
+import { AcpRuntimeError, createRuntimeStore } from "acpx/runtime";
 import { runChildProcess } from "../server-utils.js";
 import {
   mirrorDirectory,
@@ -740,6 +741,103 @@ describe("ACP settlement — Layer A: engine teardown orchestration", () => {
     expect(result.errorCode).toBe("acpx_turn_failed");
     expect(result.errorMessage).toContain("turn upstream boom");
     expect(result.errorMessage).not.toContain("close boom");
+  });
+
+  it("test_session_resume_required_discard_marks_the_record_for_reset_even_when_close_throws", async () => {
+    // GitHub issue #12: a Cloud Run redeploy wipes Gemini CLI's own session
+    // files, but acpx's own persisted record survives and still points at the
+    // now-dead ACP session, so the turn fails with
+    // detailCode "SESSION_RESUME_REQUIRED" (sessionUnavailable, execute.ts
+    // ~:4953-4955), which sets discardPersistentState. acpx's real close()
+    // only sets `reset_on_next_ensure` AFTER a successful backend
+    // session/close (runtime.js ~:1302-1315); Gemini CLI does not support
+    // `session/close`, so that close throws ACP_BACKEND_UNSUPPORTED_CONTROL
+    // first and the flag is never saved — the next run resumes the dead
+    // session forever. `endSession` must mark the record reset itself,
+    // independent of the close outcome (`markSessionRecordResetOnDiscard`).
+    const root = await makeTempRoot();
+    const stateDir = path.join(root, "state");
+    // A real acpx session store rooted at the run's own stateDir — the same
+    // store `endSession` reads/writes through `persistedRuntimeStore`.
+    const store = createRuntimeStore({ stateDir });
+    let capturedSessionKey: string | undefined;
+
+    const execute = createAcpxEngineExecutor({
+      createRuntime: () =>
+        ({
+          ensureSession: async (input: { sessionKey: string }) => {
+            // The engine passes its computed `sessionKey` straight through
+            // (execute.ts ~:4382); capture it here rather than reproducing
+            // the engine's fingerprint hash, and use the same call to
+            // pre-seed a persisted record for it — as if a prior run had
+            // already established and saved this persistent ACP session.
+            capturedSessionKey = input.sessionKey;
+            const now = new Date().toISOString();
+            await store.save({
+              schema: "acpx.session.v1",
+              acpxRecordId: input.sessionKey,
+              acpSessionId: "backend-session",
+              agentCommand: "node ./fake-acp.js",
+              cwd: root,
+              createdAt: now,
+              lastUsedAt: now,
+              lastSeq: 0,
+              eventLog: {
+                active_path: path.join(stateDir, "sessions", "unused.stream.ndjson"),
+                segment_count: 1,
+                max_segment_bytes: 1024,
+                max_segments: 1,
+              },
+              messages: [],
+              updated_at: now,
+              cumulative_token_usage: {},
+              request_token_usage: {},
+            } as never);
+            return okHandle;
+          },
+          startTurn: () => ({
+            events: (async function* () {})(),
+            result: Promise.resolve({
+              status: "failed",
+              error: {
+                message:
+                  "Persistent ACP session backend-session could not be resumed: Internal error (acpx_turn_failed)",
+                detailCode: "SESSION_RESUME_REQUIRED",
+              },
+            }),
+            cancel: async () => {},
+          }),
+          // Gemini CLI does not support `session/close`; acpx's real close()
+          // rejects with this same shape before it ever saves
+          // reset_on_next_ensure.
+          close: vi.fn(async () => {
+            throw new AcpRuntimeError(
+              "ACP_BACKEND_UNSUPPORTED_CONTROL",
+              "Agent does not support session/close for backend-session.",
+            );
+          }),
+        }) as never,
+    });
+
+    const result = await execute({
+      runId: "resume-required",
+      agent: { id: "agent-1", companyId: "company-1" },
+      runtime: {},
+      config: { agent: "custom", agentCommand: "node ./fake-acp.js", stateDir, mode: "persistent" },
+      context: {},
+      onLog: async () => {},
+      onMeta: async () => {},
+    } as never);
+
+    expect(result.exitCode).toBe(1);
+    expect(capturedSessionKey).toBeTruthy();
+
+    // No warm entry matches (a Cloud Run redeploy starts a fresh process with
+    // an empty in-memory warm-handle map), so this exercises the direct
+    // `runtime.close()` path in `endSession` — the same path a real
+    // post-redeploy run takes.
+    const record = await store.load(capturedSessionKey!);
+    expect(record?.acpx?.reset_on_next_ensure).toBe(true);
   });
 });
 
