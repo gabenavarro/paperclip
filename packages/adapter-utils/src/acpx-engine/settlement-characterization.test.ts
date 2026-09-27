@@ -743,7 +743,7 @@ describe("ACP settlement — Layer A: engine teardown orchestration", () => {
     expect(result.errorMessage).not.toContain("close boom");
   });
 
-  it("test_session_resume_required_discard_marks_the_record_for_reset_even_when_close_throws", async () => {
+  it("marks a discarded session record for reset even when the agent cannot close it", async () => {
     // GitHub issue #12: a Cloud Run redeploy wipes Gemini CLI's own session
     // files, but acpx's own persisted record survives and still points at the
     // now-dead ACP session, so the turn fails with
