@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -33,6 +33,8 @@ case "$*" in
   # images describe also reads Container Analysis, which a registry-only deployer cannot.
   "artifacts docker images describe"*)
     echo "ERROR: Permission 'containeranalysis.occurrences.list' denied" >&2; exit 1 ;;
+  *"subnets describe"*"ipCidrRange"*) echo "10.128.0.0/20" ;;
+  *"compute instances describe"*"networkInterfaces[1].networkIP"*) echo "10.128.0.9" ;;
   "artifacts docker tags list"*)
     if [ -n "\${STUB_IMAGE_EXISTS:-}" ]; then printf 'older-tag\\ntest\\n'; fi ;;
   *" describe "*|*" list"*|"projects describe"*)
@@ -272,8 +274,122 @@ test("private LLM endpoint: models become the provider map; public hosts get a w
   const privateRun = runScript(setupSandbox({ ...base, PRIVATE_LLM_BASE_URL: "http://10.128.0.5:8000/v1" }), ["setup", "--dry-run", "--yes"], { STUB_EXISTING: "1" });
   assert.equal(privateRun.status, 0, privateRun.stderr);
   assert.doesNotMatch(privateRun.stderr, /is not a private address/);
-  assert.ok(privateRun.stdout.includes('"models":{"llama-3.3-70b":{},"qwen/qwen3-32b":{}}'), privateRun.stdout);
+  assert.ok(privateRun.stdout.includes('"models":{"llama-3.3-70b":{"tool_call":true},"qwen/qwen3-32b":{"tool_call":true}}'), privateRun.stdout);
+
+  const limited = runScript(setupSandbox({ ...base, PRIVATE_LLM_BASE_URL: "http://10.128.0.5:8000/v1", PRIVATE_LLM_CONTEXT: "262144", PRIVATE_LLM_OUTPUT: "32768" }), ["setup", "--dry-run", "--yes"], { STUB_EXISTING: "1" });
+  assert.equal(limited.status, 0, limited.stderr);
+  assert.ok(limited.stdout.includes('"qwen/qwen3-32b":{"tool_call":true,"limit":{"context":262144,"output":32768}}'), limited.stdout);
 
   const publicRun = runScript(setupSandbox({ ...base, PRIVATE_LLM_BASE_URL: "https://llm.example.com/v1" }), ["setup", "--dry-run", "--yes"], { STUB_EXISTING: "1" });
   assert.match(publicRun.stderr, /llm\.example\.com is not a private address/);
+});
+
+const FORWARDER = { ...EXISTING, FORWARDS: "17434=100.64.1.5:17434" };
+
+test("forwarder plans a free-tier VM with an IPv6 egress NIC and a Cloud Run NIC, and keeps the key off argv", () => {
+  const sandbox = setupSandbox(FORWARDER);
+  const keyFile = path.join(sandbox.dir, "ts-key");
+  writeFileSync(keyFile, "tskey-auth-SECRET123");
+  writeFileSync(sandbox.configFile, `${readFileSync(sandbox.configFile, "utf8")}TS_AUTHKEY_FILE=${keyFile}\n`);
+
+  const r = runScript(sandbox, ["forwarder", "--dry-run", "--yes"]);
+
+  assert.equal(r.status, 0, r.stderr);
+  for (const re of [
+    /secrets create paperclip-tailnet-fwd-tailscale-authkey .*--data-file=-/,
+    /secret value passed on stdin/,
+    /iam service-accounts create paperclip-tailnet-fwd /,
+    /secrets add-iam-policy-binding paperclip-tailnet-fwd-tailscale-authkey .*serviceAccount:paperclip-tailnet-fwd@pc-existing\.iam\.gserviceaccount\.com .*roles\/secretmanager\.secretAccessor/,
+    /compute networks create paperclip-tailnet-fwd-egress .*--subnet-mode=custom/,
+    /compute networks subnets create paperclip-tailnet-fwd-egress .*--stack-type=IPV4_IPV6 --ipv6-access-type=EXTERNAL/,
+    /compute firewall-rules create paperclip-tailnet-fwd-tailscale .*--network=paperclip-tailnet-fwd-egress .*--allow=udp:41641/,
+    /compute firewall-rules create paperclip-tailnet-fwd-ingress .*--network=default .*--allow=tcp:17434 --source-ranges=10\.128\.0\.0\/20 --target-tags=paperclip-tailnet-fwd/,
+    /compute instances create paperclip-tailnet-fwd .*--machine-type=e2-micro/,
+    // print_cmd shows each argument with printf %q, which escapes commas.
+    /--network-interface=subnet=paperclip-tailnet-fwd-egress\\?,stack-type=IPV4_IPV6\\?,no-address --network-interface=subnet=default\\?,no-address/,
+    /--boot-disk-type=pd-standard --boot-disk-size=10GB --image-family=debian-12/,
+    /paperclip-forwards=17434=100\.64\.1\.5:17434/,
+    /paperclip-ts-tag=tag:paperclip-forwarder/,
+    /startup-script=\S*scripts\/gcp-tailnet-forwarder-startup\.sh/,
+  ]) {
+    assert.match(r.stdout, re);
+  }
+  assert.doesNotMatch(r.stdout + r.stderr + r.calls, /SECRET123/);
+});
+
+test("forwarder refuses a forward that is not PORT=TAILNET_IP:PORT", () => {
+  const r = runScript(setupSandbox({ ...EXISTING, FORWARDS: "17434=my-gpu-box:17434" }), ["forwarder", "--dry-run", "--yes"]);
+
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /FORWARDS must look like/);
+  assert.doesNotMatch(r.stdout, /compute instances create/);
+});
+
+test("forwarder-verify calls each forward from a Cloud Run job in the service's VPC", () => {
+  const r = runScript(setupSandbox(FORWARDER), ["forwarder-verify", "--dry-run", "--yes"]);
+
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /run jobs deploy paperclip-forwarder-check .*--network=default --subnet=default --vpc-egress=private-ranges-only/);
+  assert.match(r.stdout, /http:\/\/10\.128\.0\.9:17434\//);
+  assert.match(r.stdout, /--execute-now --wait/);
+});
+
+test("forwarder-teardown removes everything forwarder created", () => {
+  const r = runScript(setupSandbox(FORWARDER), ["forwarder-teardown", "--dry-run", "--yes"]);
+
+  assert.equal(r.status, 0, r.stderr);
+  for (const re of [
+    /compute instances delete paperclip-tailnet-fwd /,
+    /firewall-rules delete paperclip-tailnet-fwd-ingress paperclip-tailnet-fwd-tailscale /,
+    /networks subnets delete paperclip-tailnet-fwd-egress /,
+    /compute networks delete paperclip-tailnet-fwd-egress /,
+    /secrets delete paperclip-tailnet-fwd-tailscale-authkey /,
+    /iam service-accounts delete paperclip-tailnet-fwd@pc-existing\.iam\.gserviceaccount\.com /,
+  ]) {
+    assert.match(r.stdout, re);
+  }
+});
+
+test("the forwarder VM's startup script joins once, then writes one socat unit per forward", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "fwd-startup-"));
+  const bin = path.join(dir, "bin");
+  const units = path.join(dir, "units");
+  const log = path.join(dir, "calls.log");
+  mkdirSync(bin);
+  mkdirSync(units);
+  writeFileSync(path.join(units, "paperclip-fwd-9999.service"), "[Service]\n");
+  const stubs = {
+    curl: `case "$*" in
+  *attributes/paperclip-forwards*) echo "17434=100.64.1.5:17434,2201=100.64.1.6:22" ;;
+  *attributes/paperclip-ts-secret*) echo "fwd-key" ;;
+  *attributes/paperclip-ts-tag*) echo "tag:paperclip-forwarder" ;;
+  *) exit 22 ;;
+esac`,
+    tailscale: `echo "tailscale $*" >> "$LOG"
+case "$1" in status) exit 1 ;; ip) echo "100.64.9.9" ;; esac`,
+    gcloud: `echo "gcloud $*" >> "$LOG"; echo "tskey-auth-SECRET456"`,
+    systemctl: `echo "systemctl $*" >> "$LOG"`,
+    "apt-get": `echo "apt-get $*" >> "$LOG"`,
+    socat: "exit 0",
+  };
+  for (const [name, body] of Object.entries(stubs)) {
+    writeFileSync(path.join(bin, name), `#!/usr/bin/env bash\n${body}\n`);
+    chmodSync(path.join(bin, name), 0o755);
+  }
+
+  const r = spawnSync("bash", [path.join(repoRoot, "scripts", "gcp-tailnet-forwarder-startup.sh")], {
+    encoding: "utf8",
+    env: { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, UNIT_DIR: units, LOG: log },
+  });
+
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /paperclip-forwarder: ready 100\.64\.9\.9/);
+  assert.match(readFileSync(path.join(units, "paperclip-fwd-17434.service"), "utf8"), /ExecStart=\/usr\/bin\/socat TCP-LISTEN:17434,fork,reuseaddr TCP:100\.64\.1\.5:17434/);
+  assert.match(readFileSync(path.join(units, "paperclip-fwd-2201.service"), "utf8"), /TCP:100\.64\.1\.6:22$/m);
+  assert.equal(existsSync(path.join(units, "paperclip-fwd-9999.service")), false, "a forward that is gone is removed");
+  const calls = readFileSync(log, "utf8");
+  assert.match(calls, /tailscale up .*--advertise-tags=tag:paperclip-forwarder .*--accept-dns=false/);
+  assert.match(calls, /gcloud secrets versions access latest --secret=fwd-key/);
+  assert.doesNotMatch(calls, /apt-get/, "tools already present: no install");
+  assert.doesNotMatch(r.stdout + r.stderr, /SECRET456/);
 });

@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # Guided setup and deploy of Paperclip on Google Cloud Run.
 #
-#   scripts/gcp-cloud-run.sh setup            # first-time setup, step by step (new or existing project)
-#   scripts/gcp-cloud-run.sh deploy           # build the image and deploy/update the service
-#   scripts/gcp-cloud-run.sh bootstrap-admin  # print a one-time invite URL for the first instance admin
+#   scripts/gcp-cloud-run.sh setup               # first-time setup, step by step (new or existing project)
+#   scripts/gcp-cloud-run.sh deploy              # build the image and deploy/update the service
+#   scripts/gcp-cloud-run.sh bootstrap-admin     # print a one-time invite URL for the first instance admin
+#   scripts/gcp-cloud-run.sh forwarder           # free-tier VM that forwards ports to your Tailscale tailnet
+#   scripts/gcp-cloud-run.sh forwarder-verify    # call each forward from a Cloud Run job in the VPC
+#   scripts/gcp-cloud-run.sh forwarder-teardown  # remove the forwarder and everything it created
 #
 # Options:
 #   --config FILE    answers file (default: secrets/cloud-run.env; KEY=VALUE, no secret values)
@@ -12,7 +15,8 @@
 #   --dry-run        print the commands that change things; run only read-only checks
 #
 # Every step explains what it does, detects what already exists, shows the exact
-# gcloud command, and asks before it runs. Guide: docs/deploy/gcp-cloud-run.md
+# gcloud command, and asks before it runs. Guides: docs/deploy/gcp-cloud-run.md and
+# docs/deploy/gcp-tailnet-forwarder.md
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -27,7 +31,7 @@ COMMAND=""
 STEP=0
 STEPS=17
 
-CONFIG_KEYS="PROJECT PROJECT_NUMBER BILLING_ACCOUNT REGION SERVICE AR_REPO IMAGE_TAG RUNTIME_SA NETWORK SUBNET DB_MODE SQL_INSTANCE DB_NAME DB_USER BUCKET GOOGLE_AUTH ALLOWED_DOMAINS ALLOWED_EMAILS GEMINI_MODEL GEMINI_LOCATION PRIVATE_LLM_BASE_URL PRIVATE_LLM_MODELS PRIVATE_LLM_KEY_SECRET CPU MEMORY MIN_INSTANCES"
+CONFIG_KEYS="PROJECT PROJECT_NUMBER BILLING_ACCOUNT REGION SERVICE AR_REPO IMAGE_TAG RUNTIME_SA NETWORK SUBNET DB_MODE SQL_INSTANCE DB_NAME DB_USER BUCKET GOOGLE_AUTH ALLOWED_DOMAINS ALLOWED_EMAILS GEMINI_MODEL GEMINI_LOCATION PRIVATE_LLM_BASE_URL PRIVATE_LLM_MODELS PRIVATE_LLM_CONTEXT PRIVATE_LLM_OUTPUT PRIVATE_LLM_KEY_SECRET CPU MEMORY MIN_INSTANCES FORWARDS FORWARDER FORWARDER_ZONE FORWARDER_TAG FORWARDER_EGRESS_RANGE TS_AUTHKEY_FILE"
 for key in $CONFIG_KEYS; do printf -v "$key" '%s' ""; done
 ACCOUNT=""
 PROJECT_CREATED=0
@@ -586,6 +590,12 @@ step_private_llm() {
   is_private_host "$host" || warn "$host is not a private address; this traffic will use the internet, not the VPC"
   ask PRIVATE_LLM_MODELS "Model IDs it serves (comma-separated)" "$PRIVATE_LLM_MODELS"
   matches "$PRIVATE_LLM_MODELS" '^[A-Za-z0-9._:/@-]+(,[A-Za-z0-9._:/@-]+)*$' || die "list model IDs separated by commas"
+  ask PRIVATE_LLM_CONTEXT "Their context window in tokens (blank: OpenCode's default)" "$PRIVATE_LLM_CONTEXT"
+  if [ -n "$PRIVATE_LLM_CONTEXT" ]; then
+    matches "$PRIVATE_LLM_CONTEXT" '^[0-9]+$' || die "the context window is a number of tokens"
+    ask PRIVATE_LLM_OUTPUT "Their maximum output in tokens" "${PRIVATE_LLM_OUTPUT:-8192}"
+    matches "$PRIVATE_LLM_OUTPUT" '^[0-9]+$' || die "the output limit is a number of tokens"
+  fi
   ask PRIVATE_LLM_KEY_SECRET "Secret Manager secret holding its API key (blank: none, or a new name to create)" "$PRIVATE_LLM_KEY_SECRET"
   if [ -n "$PRIVATE_LLM_KEY_SECRET" ] && ! ensure_resource "secret $PRIVATE_LLM_KEY_SECRET" gcloud secrets describe "$PRIVATE_LLM_KEY_SECRET" --project="$PROJECT"; then
     local key=""
@@ -700,9 +710,11 @@ EOF
 
 yaml_line() { printf "%s: '%s'\n" "$1" "$(printf '%s' "$2" | sed "s/'/''/g")"; }
 
+# Each model declares tool calling (agents need it) and, when set, its token limits.
 opencode_providers_json() {
-  local models
-  models=$(printf '%s' "$PRIVATE_LLM_MODELS" | sed 's/[^,]*/"&":{}/g')
+  local entry='{"tool_call":true}' models
+  [ -n "$PRIVATE_LLM_CONTEXT" ] && entry="{\"tool_call\":true,\"limit\":{\"context\":$PRIVATE_LLM_CONTEXT,\"output\":${PRIVATE_LLM_OUTPUT:-8192}}}"
+  models=$(printf '%s' "$PRIVATE_LLM_MODELS" | sed "s/[^,]*/\"&\":$entry/g")
   printf '{"private":{"npm":"@ai-sdk/openai-compatible","name":"Private LLM","options":{"baseURL":"{env:PRIVATE_LLM_BASE_URL}","apiKey":"{env:PRIVATE_LLM_API_KEY}"},"models":{%s}}}' "$models"
 }
 
@@ -853,11 +865,157 @@ print_summary() {
 
 # ------------------------------------------------------------------- main ---
 
-usage() { sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+# -------------------------------------------------------------- forwarder ---
+# A free-tier e2-micro VM that joins your Tailscale tailnet and forwards fixed
+# ports, so Cloud Run reaches tailnet services at the VM's internal IP. NIC 0
+# sits in a small VPC whose subnet has external IPv6 (free, unlike an external
+# IPv4): the VM's only way out to Tailscale. NIC 1 sits in the Cloud Run subnet.
+
+forwarder_defaults() {
+  apply_defaults
+  FORWARDER=${FORWARDER:-$SERVICE-tailnet-fwd}
+  FORWARDER_ZONE=${FORWARDER_ZONE:-$REGION-a}
+  FORWARDER_TAG=${FORWARDER_TAG:-tag:paperclip-forwarder}
+  FORWARDER_EGRESS_RANGE=${FORWARDER_EGRESS_RANGE:-172.31.254.0/29}
+  TS_AUTHKEY_FILE=${TS_AUTHKEY_FILE:-$REPO_ROOT/secrets/tailscale-forwarder-authkey}
+}
+
+forwarder_sa() { printf '%s@%s.iam.gserviceaccount.com' "$FORWARDER" "$PROJECT"; }
+
+check_forwards() {
+  matches "$FORWARDS" '^[0-9]+=[0-9.]+:[0-9]+(,[0-9]+=[0-9.]+:[0-9]+)*$' \
+    || die "FORWARDS must look like 17434=100.64.1.5:17434 (VM_PORT=TAILNET_IPV4:PORT, comma-separated)"
+}
+
+forward_ports() { printf '%s\n' "$FORWARDS" | tr ',' '\n' | sed 's/=.*//'; }
+
+forwarder_ip() {
+  lookup gcloud compute instances describe "$FORWARDER" --zone="$FORWARDER_ZONE" --project="$PROJECT" \
+    --format='value(networkInterfaces[1].networkIP)'
+}
+
+cmd_forwarder() {
+  require_config
+  forwarder_defaults
+  STEPS=1
+  header "Tailnet forwarder: $FORWARDER (e2-micro, $FORWARDER_ZONE)"
+  say "  The VM joins your tailnet as $FORWARDER_TAG and forwards fixed ports; Cloud Run"
+  say "  reaches them at the VM's internal IP. Guide: docs/deploy/gcp-tailnet-forwarder.md"
+  ask FORWARDS "Forwards (VM_PORT=TAILNET_IPV4:PORT, comma-separated)" "$FORWARDS"
+  check_forwards
+  local secret="$FORWARDER-tailscale-authkey" egress="$FORWARDER-egress" sa cidr rules metadata key="" start=0
+  local startup="$REPO_ROOT/scripts/gcp-tailnet-forwarder-startup.sh"
+  sa=$(forwarder_sa)
+  cidr=$(lookup gcloud compute networks subnets describe "$SUBNET" --region="$REGION" --project="$PROJECT" --format='value(ipCidrRange)')
+  [ -n "$cidr" ] || die "cannot read the range of subnet $SUBNET in $REGION"
+
+  # The auth key goes to Secret Manager on stdin; the VM reads it once, at first boot.
+  if ! ensure_resource "secret $secret" gcloud secrets describe "$secret" --project="$PROJECT"; then
+    if [ -f "$TS_AUTHKEY_FILE" ]; then key=$(tr -d '[:space:]' < "$TS_AUTHKEY_FILE"); else ask_secret key "Tailscale auth key (tagged $FORWARDER_TAG, hidden)"; fi
+    [ -n "$key" ] || [ "$DRY_RUN" = 1 ] || die "no Tailscale auth key; see docs/deploy/gcp-tailnet-forwarder.md"
+    run_secret "${key:-dry-run}" gcloud secrets create "$secret" --project="$PROJECT" --replication-policy=automatic --data-file=-
+  fi
+  # A service account with no project roles; it may read only that secret.
+  ensure_resource "service account $sa" gcloud iam service-accounts describe "$sa" --project="$PROJECT" \
+    || run gcloud iam service-accounts create "$FORWARDER" --project="$PROJECT" --display-name="Paperclip tailnet forwarder"
+  run gcloud secrets add-iam-policy-binding "$secret" --project="$PROJECT" --member="serviceAccount:$sa" --role=roles/secretmanager.secretAccessor
+
+  ensure_resource "network $egress" gcloud compute networks describe "$egress" --project="$PROJECT" \
+    || run gcloud compute networks create "$egress" --project="$PROJECT" --subnet-mode=custom
+  ensure_resource "subnet $egress" gcloud compute networks subnets describe "$egress" --region="$REGION" --project="$PROJECT" \
+    || run gcloud compute networks subnets create "$egress" --project="$PROJECT" --network="$egress" --region="$REGION" \
+      --range="$FORWARDER_EGRESS_RANGE" --stack-type=IPV4_IPV6 --ipv6-access-type=EXTERNAL --enable-private-ip-google-access
+  # WireGuard's port, so tailnet peers can connect directly instead of through a relay.
+  ensure_resource "firewall rule $FORWARDER-tailscale" gcloud compute firewall-rules describe "$FORWARDER-tailscale" --project="$PROJECT" \
+    || run gcloud compute firewall-rules create "$FORWARDER-tailscale" --project="$PROJECT" --network="$egress" \
+      --direction=INGRESS --allow=udp:41641 --source-ranges=::/0 --target-tags="$FORWARDER"
+  # Only the Cloud Run subnet may reach the forwarded ports.
+  rules=$(forward_ports | sed 's/^/tcp:/' | paste -sd, -)
+  if ensure_resource "firewall rule $FORWARDER-ingress" gcloud compute firewall-rules describe "$FORWARDER-ingress" --project="$PROJECT"; then
+    run gcloud compute firewall-rules update "$FORWARDER-ingress" --project="$PROJECT" --allow="$rules" --source-ranges="$cidr"
+  else
+    run gcloud compute firewall-rules create "$FORWARDER-ingress" --project="$PROJECT" --network="$NETWORK" \
+      --direction=INGRESS --allow="$rules" --source-ranges="$cidr" --target-tags="$FORWARDER"
+  fi
+
+  # "^;^" makes ";" the metadata separator, because FORWARDS itself has commas.
+  metadata="paperclip-forwards=$FORWARDS;paperclip-ts-secret=$secret;paperclip-ts-tag=$FORWARDER_TAG"
+  if ensure_resource "VM $FORWARDER" gcloud compute instances describe "$FORWARDER" --zone="$FORWARDER_ZONE" --project="$PROJECT"; then
+    say "  Updating the forwards; a restart runs the startup script again."
+    start=$(lookup gcloud compute instances get-serial-port-output "$FORWARDER" --zone="$FORWARDER_ZONE" --project="$PROJECT" --format='value(next)')
+    run gcloud compute instances add-metadata "$FORWARDER" --zone="$FORWARDER_ZONE" --project="$PROJECT" \
+      --metadata="^;^$metadata" --metadata-from-file=startup-script="$startup"
+    run gcloud compute instances reset "$FORWARDER" --zone="$FORWARDER_ZONE" --project="$PROJECT"
+  else
+    run gcloud compute instances create "$FORWARDER" --project="$PROJECT" --zone="$FORWARDER_ZONE" --machine-type=e2-micro \
+      --network-interface="subnet=$egress,stack-type=IPV4_IPV6,no-address" --network-interface="subnet=$SUBNET,no-address" \
+      --boot-disk-type=pd-standard --boot-disk-size=10GB --image-family=debian-12 --image-project=debian-cloud \
+      --shielded-secure-boot --shielded-vtpm --shielded-integrity-monitoring \
+      --service-account="$sa" --scopes=cloud-platform --tags="$FORWARDER" \
+      --metadata="^;^$metadata" --metadata-from-file=startup-script="$startup"
+  fi
+  save_config
+  [ "$DRY_RUN" = 1 ] && return 0
+  wait_for_forwarder "${start:-0}"
+}
+
+wait_for_forwarder() {
+  local start=$1 out="" ip
+  say "  Waiting for the VM to join the tailnet and start forwarding (up to 5 minutes)..."
+  for _ in $(seq 1 30); do
+    out=$(lookup gcloud compute instances get-serial-port-output "$FORWARDER" --zone="$FORWARDER_ZONE" --project="$PROJECT" --start="$start" \
+      | grep -o 'paperclip-forwarder: ready.*' | tail -n 1 || true)
+    [ -n "$out" ] && break
+    sleep 10
+  done
+  [ -n "$out" ] || die "the VM has not reported ready; read: gcloud compute instances get-serial-port-output $FORWARDER --zone=$FORWARDER_ZONE --project=$PROJECT"
+  ip=$(forwarder_ip)
+  say "  ✓ ${out#paperclip-forwarder: }"
+  say "  Cloud Run reaches the forwards at $ip, for example http://$ip:$(forward_ports | head -n 1)/"
+  say "  Next: scripts/gcp-cloud-run.sh forwarder-verify"
+}
+
+cmd_forwarder_verify() {
+  require_config
+  forwarder_defaults
+  check_forwards
+  STEPS=1
+  header "Check the forwards from inside the Cloud Run VPC"
+  local ip port
+  ip=$(forwarder_ip)
+  [ -n "$ip" ] || die "VM $FORWARDER not found in $FORWARDER_ZONE; run: scripts/gcp-cloud-run.sh forwarder"
+  for port in $(forward_ports); do
+    say "  A one-off Cloud Run job in $NETWORK/$SUBNET calls http://$ip:$port/ (any answer counts;"
+    say "  a failed connection fails the job)."
+    run gcloud run jobs deploy "$SERVICE-forwarder-check" --project="$PROJECT" --region="$REGION" \
+      --image=curlimages/curl:8.10.1 --service-account="$RUNTIME_SA" \
+      --network="$NETWORK" --subnet="$SUBNET" --vpc-egress=private-ranges-only \
+      --args="-sS,--http0.9,-m,15,-o,/dev/null,http://$ip:$port/" --max-retries=0 --task-timeout=60 --execute-now --wait
+  done
+  [ "$DRY_RUN" = 1 ] || say "  ✓ Cloud Run reached every forward."
+}
+
+cmd_forwarder_teardown() {
+  require_config
+  forwarder_defaults
+  STEPS=1
+  header "Remove the tailnet forwarder"
+  local egress="$FORWARDER-egress"
+  run_or_warn gcloud compute instances delete "$FORWARDER" --zone="$FORWARDER_ZONE" --project="$PROJECT" --quiet
+  run_or_warn gcloud compute firewall-rules delete "$FORWARDER-ingress" "$FORWARDER-tailscale" --project="$PROJECT" --quiet
+  run_or_warn gcloud compute networks subnets delete "$egress" --region="$REGION" --project="$PROJECT" --quiet
+  run_or_warn gcloud compute networks delete "$egress" --project="$PROJECT" --quiet
+  run_or_warn gcloud secrets delete "$FORWARDER-tailscale-authkey" --project="$PROJECT" --quiet
+  run_or_warn gcloud iam service-accounts delete "$(forwarder_sa)" --project="$PROJECT" --quiet
+  run_or_warn gcloud run jobs delete "$SERVICE-forwarder-check" --region="$REGION" --project="$PROJECT" --quiet
+  say "  Also remove the device from your tailnet: https://login.tailscale.com/admin/machines"
+}
+
+usage() { sed -n '2,19p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    setup|deploy|bootstrap-admin) COMMAND=$1 ;;
+    setup|deploy|bootstrap-admin|forwarder|forwarder-verify|forwarder-teardown) COMMAND=$1 ;;
     --config) CONFIG_FILE=${2:?--config needs a file}; shift ;;
     --key-file) export CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE; CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE="$(cd "$(dirname "${2:?--key-file needs a file}")" && pwd)/$(basename "$2")"; shift ;;
     --yes|-y) YES=1 ;;
@@ -878,4 +1036,7 @@ case "$COMMAND" in
   setup) cmd_setup ;;
   deploy) cmd_deploy ;;
   bootstrap-admin) cmd_bootstrap_admin ;;
+  forwarder) cmd_forwarder ;;
+  forwarder-verify) cmd_forwarder_verify ;;
+  forwarder-teardown) cmd_forwarder_teardown ;;
 esac
