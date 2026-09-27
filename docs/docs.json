@@ -85,6 +85,7 @@
               "deploy/tailscale-private-access",
               "deploy/docker",
               "deploy/gcp-cloud-run",
+              "deploy/gcp-tailnet-forwarder",
               "deploy/hpc-agents",
               "deploy/deployment-modes",
               "deploy/database",

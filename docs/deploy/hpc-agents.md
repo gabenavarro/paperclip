@@ -45,7 +45,7 @@ As an administrator on the box (Ubuntu 24.04):
 
 ## 2. Connect Paperclip
 
-1. Route the Cloud Run VPC to the site (HA VPN or Interconnect). Allow TCP 22 from the Cloud Run subnet only.
+1. Give Cloud Run a private path to the box's SSH port. Use an HA VPN or Interconnect to the site, or, if the box is on your Tailscale tailnet, a [tailnet forwarder](gcp-tailnet-forwarder.md) with a forward such as `2201=<box tailnet IP>:22`. Allow the SSH port from the Cloud Run subnet only.
    - Paperclip's ssh sends a keepalive every 15 s and closes the connection after about 60 s with no reply. A VPN outage longer than a minute fails every run on the box.
 2. In Paperclip, turn on **Instance Settings → Experimental → Environments**.
 3. Create an **SSH** environment:

@@ -111,17 +111,18 @@ The service also sets `PAPERCLIP_LOCAL_AI_LOGIN_ENABLED=false`. A Cloud Run serv
 
 ## Private OpenAI-compatible endpoints
 
-Cloud Run sends traffic for private ranges (RFC 1918 and `100.64.0.0/10`) into your VPC. Anything the VPC can reach at a private address is reachable, for example a vLLM server on a VM, an internal load balancer, or a GKE internal service. In the private endpoint step, give three answers:
+Cloud Run sends traffic for private ranges (RFC 1918 and `100.64.0.0/10`) into your VPC. Anything the VPC can reach at a private address is reachable, for example a vLLM server on a VM, an internal load balancer, or a GKE internal service. In the private endpoint step, give these answers:
 
 - the base URL, for example `http://10.128.0.5:8000/v1`
 - the model IDs it serves
+- optionally, their context window and maximum output in tokens
 - optionally, a Secret Manager secret that holds its API key
 
-The script sets `PAPERCLIP_OPENCODE_PROVIDERS` to an OpenAI-compatible provider named `private`. In Paperclip, create an **OpenCode** agent with model `private/<model-id>`.
+The script sets `PAPERCLIP_OPENCODE_PROVIDERS` to an OpenAI-compatible provider named `private`. Each model declares tool calling, which agents need, and the token limits when you give them. In Paperclip, create an **OpenCode** agent with model `private/<model-id>`.
 
 On the endpoint side, add a VPC firewall rule. It allows TCP from the Cloud Run subnet's range to the server port.
 
-A server that is not in the VPC, for example on a Tailscale tailnet, is not reachable until you route it into the VPC. One way is a VM in the VPC that runs a Tailscale subnet router, plus a VPC route for `100.64.0.0/10`.
+A server that is not in the VPC, for example on a Tailscale tailnet, is not reachable directly. Use the [tailnet forwarder](gcp-tailnet-forwarder.md): a free-tier VM that joins your tailnet and forwards fixed ports.
 
 ## Cost
 
