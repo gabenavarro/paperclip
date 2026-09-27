@@ -7,6 +7,7 @@ const {
   prepareWorkspaceForSshExecution,
   restoreWorkspaceFromSshExecution,
   runSshCommand,
+  shellQuote,
   syncDirectoryToSsh,
 } = vi.hoisted(() => ({
   prepareWorkspaceForSshExecution: vi.fn(async () => ({ gitBacked: false })),
@@ -15,6 +16,8 @@ const {
     stdout: Buffer.from('{"token":"remote"}\n').toString("base64"),
     stderr: "",
   })),
+  // remote-managed-runtime.ts imports shellQuote from ./ssh.js, so the mock must provide it.
+  shellQuote: (value: string) => `'${value.replace(/'/g, `'"'"'`)}'`,
   syncDirectoryToSsh: vi.fn(async (_input: { localDir: string }) => undefined),
 }));
 
@@ -22,10 +25,11 @@ vi.mock("./ssh.js", () => ({
   prepareWorkspaceForSshExecution,
   restoreWorkspaceFromSshExecution,
   runSshCommand,
+  shellQuote,
   syncDirectoryToSsh,
 }));
 
-import { prepareRemoteManagedRuntime } from "./remote-managed-runtime.js";
+import { prepareRemoteManagedRuntime, remoteRunDirForCleanup } from "./remote-managed-runtime.js";
 import { resolveReferencedSourceIgnore } from "./sandbox-managed-runtime.js";
 import { setExpensiveWorkspaceGitExecutor } from "./git-workspace-sync.js";
 
@@ -320,6 +324,20 @@ describe("remote managed runtime", () => {
       expect(warnedText).not.toContain(failedDir);
     } finally {
       warnSpy.mockRestore();
+    }
+  });
+});
+
+describe("remoteRunDirForCleanup", () => {
+  it("returns the per-run directory for a normal run id", () => {
+    expect(remoteRunDirForCleanup("/srv/ws", "3f0c1c9e-1b2a-4c3d-8e9f-0a1b2c3d4e5f")).toBe(
+      "/srv/ws/.paperclip-runtime/runs/3f0c1c9e-1b2a-4c3d-8e9f-0a1b2c3d4e5f",
+    );
+  });
+
+  it("refuses empty, dot and path-like run ids", () => {
+    for (const runId of ["", ".", "..", "../x", "a/b", " x"]) {
+      expect(remoteRunDirForCleanup("/srv/ws", runId)).toBeNull();
     }
   });
 });

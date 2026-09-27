@@ -939,12 +939,14 @@ export async function runAdapterExecutionTargetShellCommand(
       try {
         // Pass the raw command — `runSshCommand` owns profile sourcing and
         // the outer shell wrapper. Wrapping again here would nest a second
-        // shell after the explicit `env KEY=VAL` overrides, re-sourcing
-        // login profiles AFTER the override and silently undoing any
-        // identity var (NVM_DIR / PATH / etc.) that a profile re-exports.
+        // shell after the env block that `runSshCommand` sends on stdin and
+        // exports once the login profiles have run, re-sourcing login
+        // profiles AFTER that export and silently undoing any identity var
+        // (NVM_DIR / PATH / etc.) that a profile re-exports.
         const result = await runSshCommand(target.spec, command, {
           env,
-          timeoutMs: (options.timeoutSec ?? 15) * 1000,
+          // `0` means "use the default", not "no timeout": a hung helper must not hang the run.
+          timeoutMs: (options.timeoutSec && options.timeoutSec > 0 ? options.timeoutSec : 15) * 1000,
         });
         if (result.stdout) await onLog("stdout", result.stdout);
         if (result.stderr) await onLog("stderr", result.stderr);
@@ -962,6 +964,7 @@ export async function runAdapterExecutionTargetShellCommand(
           stdout?: string;
           stderr?: string;
           signal?: string | null;
+          killed?: boolean;
         };
         const stdout = timedOutError.stdout ?? "";
         const stderr = timedOutError.stderr ?? "";
@@ -978,7 +981,10 @@ export async function runAdapterExecutionTargetShellCommand(
             startedAt,
           };
         }
-        if (timedOutError.code !== "ETIMEDOUT") {
+        // execFile reports its own timeout as `killed` with no exit code, not ETIMEDOUT.
+        const isTimeout =
+          timedOutError.code === "ETIMEDOUT" || (timedOutError.killed === true && timedOutError.code == null);
+        if (!isTimeout) {
           throw error;
         }
         if (stdout) await onLog("stdout", stdout);
@@ -1019,6 +1025,15 @@ export async function runAdapterExecutionTargetShellCommand(
       onLog,
     },
   );
+}
+
+/** Setup steps that ignore a shell command's result must still fail loudly when it timed out. */
+export function throwIfShellCommandTimedOut(result: RunProcessResult, label: string): RunProcessResult {
+  if (result.timedOut) {
+    const detail = result.stderr.trim().slice(-500);
+    throw new Error(`${label} timed out${detail ? `: ${detail}` : ""}`);
+  }
+  return result;
 }
 
 export interface AdapterSandboxInstallCommandCheck {
@@ -1131,11 +1146,14 @@ export async function readAdapterExecutionTargetHomeDir(
   target: AdapterExecutionTarget | null | undefined,
   options: AdapterExecutionTargetShellOptions,
 ): Promise<string | null> {
-  const result = await runAdapterExecutionTargetShellCommand(
-    runId,
-    target,
-    'printf %s "$HOME"',
-    options,
+  const result = throwIfShellCommandTimedOut(
+    await runAdapterExecutionTargetShellCommand(
+      runId,
+      target,
+      'printf %s "$HOME"',
+      options,
+    ),
+    "Reading the remote home directory",
   );
   const homeDir = result.stdout.trim();
   return homeDir.length > 0 ? homeDir : null;
@@ -4814,6 +4832,8 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
       handleRequest: (request, options) => forwardBridgeRequest(request, options?.signal, {
         reservation: options?.reservation,
       }),
+      // Over ssh every poll is a remote command; once a second is enough.
+      pollIntervalMs: target.transport === "ssh" ? 1_000 : undefined,
     });
     server = await startSandboxCallbackBridgeServer({
       runner,

@@ -5,6 +5,7 @@ import {
   prepareWorkspaceForSshExecution,
   runSshCommand,
   restoreWorkspaceFromSshExecution,
+  shellQuote,
   syncDirectoryToSsh,
 } from "./ssh.js";
 import {
@@ -70,10 +71,6 @@ function asNumber(value: unknown): number {
   return typeof value === "number" ? value : Number(value);
 }
 
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'"'"'`)}'`;
-}
-
 async function readRemoteFile(spec: SshRemoteExecutionSpec, remotePath: string): Promise<Buffer> {
   const result = await runSshCommand(spec, `base64 < ${shellQuote(remotePath)}`, {
     maxBuffer: 1024 * 1024,
@@ -104,6 +101,12 @@ export function remoteExecutionSessionMatches(saved: unknown, current: SshRemote
     asString(parsedSaved.username) === currentIdentity.username &&
     asString(parsedSaved.remoteCwd) === currentIdentity.remoteCwd
   );
+}
+
+/** The per-run directory to delete after a restore, or null when deleting would be unsafe. */
+export function remoteRunDirForCleanup(baseWorkspaceRemoteDir: string, runId: string): string | null {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(runId)) return null;
+  return path.posix.join(baseWorkspaceRemoteDir, ".paperclip-runtime", "runs", runId);
 }
 
 export async function prepareRemoteManagedRuntime(input: {
@@ -247,6 +250,14 @@ export async function prepareRemoteManagedRuntime(input: {
         await asset.restore({
           assetDir: path.posix.join(runtimeRootDir, asset.key),
           readFile: (remotePath) => readRemoteFile(input.spec, remotePath),
+        });
+      }
+
+      // The per-run copy is only needed until its changes are restored.
+      const runDir = syncWorkspace ? remoteRunDirForCleanup(baseWorkspaceRemoteDir, input.runId) : null;
+      if (runDir) {
+        await runSshCommand(input.spec, `rm -rf ${shellQuote(runDir)}`, { timeoutMs: 60_000 }).catch((error) => {
+          console.warn(`[paperclip] Failed to remove remote run directory ${runDir}: ${String(error)}`);
         });
       }
     },

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import { constants as fsConstants, createReadStream, createWriteStream, promises as fs } from "node:fs";
 import net from "node:net";
@@ -57,23 +57,17 @@ export function createSshCommandManagedRuntimeRunner(input: {
       const command = commandInput.command.trim();
       const args = commandInput.args ?? [];
       const cwd = commandInput.cwd?.trim() || defaultCwd;
-      const envEntries = Object.entries(commandInput.env ?? {})
-        .filter((entry): entry is [string, string] => typeof entry[1] === "string");
-      const envPrefix = envEntries.length > 0
-        ? `env ${envEntries.map(([key, value]) => `${key}=${shellQuote(value)}`).join(" ")} `
-        : "";
-      const exportPrefix = envEntries.length > 0
-        ? envEntries.map(([key, value]) => `export ${key}=${shellQuote(value)};`).join(" ") + " "
-        : "";
-      const commandScript = command === "sh" || command === "bash"
-        ? (args[0] === "-c" || args[0] === "-lc") && typeof args[1] === "string"
-          ? `${exportPrefix}${args[1]}`
-          : `${envPrefix}exec ${[shellQuote(command), ...args.map((arg) => shellQuote(arg))].join(" ")}`
-        : `${envPrefix}exec ${[shellQuote(command), ...args.map((arg) => shellQuote(arg))].join(" ")}`;
+      const commandScript =
+        (command === "sh" || command === "bash") &&
+        (args[0] === "-c" || args[0] === "-lc") &&
+        typeof args[1] === "string"
+          ? args[1]
+          : `exec ${[shellQuote(command), ...args.map((arg) => shellQuote(arg))].join(" ")}`;
       const remoteCommand = `cd ${shellQuote(cwd)} && ${commandScript}`;
 
       try {
         const result = await runSshCommand(input.spec, remoteCommand, {
+          env: commandInput.env,
           stdin: commandInput.stdin,
           timeoutMs: commandInput.timeoutMs,
           maxBuffer: maxBufferBytes,
@@ -157,6 +151,45 @@ export function shellQuote(value: string) {
 
 function isValidShellEnvKey(value: string) {
   return /^[A-Za-z_][A-Za-z0-9_]*$/.test(value);
+}
+
+// The SSH target is an operator-configured host, not a sandbox image, so it can
+// expose `node` or an agent CLI only through a login profile. `/etc/profile`
+// comes first for hosts that set PATH in `/etc/profile.d`; `.bashrc` runs only
+// when there is no `.bash_profile`, which usually sources it. Profiles read
+// stdin from /dev/null, so they cannot eat the env block or the command's own
+// input. The env block is exported after them, so its values win.
+const LOGIN_PROFILE_SCRIPT = [
+  'if [ -f /etc/profile ]; then . /etc/profile </dev/null >/dev/null 2>&1 || true; fi',
+  'if [ -f "$HOME/.profile" ]; then . "$HOME/.profile" </dev/null >/dev/null 2>&1 || true; fi',
+  'if [ -f "$HOME/.bash_profile" ]; then . "$HOME/.bash_profile" </dev/null >/dev/null 2>&1 || true; elif [ -f "$HOME/.bashrc" ]; then . "$HOME/.bashrc" </dev/null >/dev/null 2>&1 || true; fi',
+  'if [ -f "$HOME/.zprofile" ]; then . "$HOME/.zprofile" </dev/null >/dev/null 2>&1 || true; fi',
+];
+
+// Env travels on stdin, never in argv: one `KEY base64(value)` line per
+// variable, then an empty line. `read` takes a pipe one byte at a time, so the
+// command after the loop still gets the rest of stdin unchanged. The `x`
+// sentinel keeps trailing newlines that `$(...)` would strip. Exit 97 means a
+// value did not decode (for example, no `base64` on the host) or stdin hit EOF
+// before the empty terminator line — fail closed instead of silently running
+// the command with a truncated env. `set +x` stops a profile's xtrace from
+// printing `export K=<secret>` into logs. `base64` is resolved once into
+// `__pc_b` before the loop runs, so a value that exports its own `PATH`
+// mid-loop cannot break a later decode. The braces make the whole sequence one
+// element of the outer `&&` chain, so its internal `;`/`||` cannot break that
+// chaining.
+const READ_ENV_FROM_STDIN =
+  '{ set +x; __pc_b=$(command -v base64) || exit 97; while IFS= read -r __pc_l || exit 97; [ -n "$__pc_l" ]; do __pc_v=$(printf %s "${__pc_l#* }" | "$__pc_b" -d && printf x) || exit 97; export "${__pc_l%% *}=${__pc_v%x}"; done; }';
+
+function encodeSshEnvStdin(env: Record<string, string | undefined> | undefined): string {
+  const lines = Object.entries(env ?? {}).flatMap(([key, value]) => {
+    if (typeof value !== "string") return [];
+    if (!isValidShellEnvKey(key)) {
+      throw new Error(`Invalid SSH environment variable key: ${key}`);
+    }
+    return [`${key} ${Buffer.from(value, "utf8").toString("base64")}\n`];
+  });
+  return lines.length > 0 ? `${lines.join("")}\n` : "";
 }
 
 export function parseSshRemoteExecutionSpec(value: unknown): SshRemoteExecutionSpec | null {
@@ -321,6 +354,8 @@ async function spawnText(
     });
 
     if (options.stdin != null && child.stdin) {
+      // Without a listener, an EPIPE (the child exited first) crashes the server; the close handler reports it.
+      child.stdin.on("error", () => {});
       child.stdin.end(options.stdin);
     }
   });
@@ -371,10 +406,39 @@ async function withTempFile(
   };
 }
 
+// One private (0700) directory per server process for ssh control sockets;
+// createSshAuthArgs names each socket by a digest of its credentials.
+let sshControlDirPath: string | undefined;
+
+async function sshControlDir(): Promise<string> {
+  // Reuse the directory only while it is still ours and private. A tmp cleaner
+  // can remove it: ssh then fails every call ("unix_listener: ... No such file
+  // or directory"), and another local user could re-create the name, which is
+  // visible in ssh's argv, and receive our sessions and their stdin.
+  const dir = sshControlDirPath;
+  const info = dir ? await fs.lstat(dir).catch(() => null) : null;
+  const uid = process.getuid?.();
+  if (dir && info?.isDirectory() && (uid === undefined || (info.uid === uid && (info.mode & 0o077) === 0))) {
+    return dir;
+  }
+  sshControlDirPath = await fs.mkdtemp(path.join(os.tmpdir(), "pc-ssh-"));
+  return sshControlDirPath;
+}
+
 async function createSshAuthArgs(
-  config: Pick<SshConnectionConfig, "privateKey" | "knownHosts" | "strictHostKeyChecking">,
+  config: SshConnectionConfig,
 ): Promise<{ args: string[]; cleanup: () => Promise<void> }> {
   const tempFiles: Array<() => Promise<void>> = [];
+  // `%C` only hashes host, port and user, which (a) can make the socket path
+  // exceed the 104-byte Unix-socket limit on macOS once ssh appends its own
+  // `.<16 random chars>` suffix, and (b) lets a second config that shares a
+  // host/port/user but differs in key material or host-key pinning reuse the
+  // first config's live master. Name the socket ourselves from a digest of
+  // everything that affects authentication instead.
+  const socketName = createHash("sha256")
+    .update(JSON.stringify([config.host, config.port, config.username, config.privateKey, config.knownHosts, config.strictHostKeyChecking]))
+    .digest("hex")
+    .slice(0, 16);
   const sshArgs = [
     "-o",
     "BatchMode=yes",
@@ -382,6 +446,18 @@ async function createSshAuthArgs(
     "ConnectTimeout=10",
     "-o",
     `StrictHostKeyChecking=${config.strictHostKeyChecking ? "yes" : "no"}`,
+    // Reuse one authenticated connection per target (see sshControlDir), and
+    // notice a dead VPN within about a minute instead of TCP's ~2 hours.
+    "-o",
+    "ControlMaster=auto",
+    "-o",
+    `ControlPath=${path.join(await sshControlDir(), socketName)}`,
+    "-o",
+    "ControlPersist=120",
+    "-o",
+    "ServerAliveInterval=15",
+    "-o",
+    "ServerAliveCountMax=4",
   ];
 
   if (config.strictHostKeyChecking) {
@@ -684,6 +760,8 @@ async function streamLocalFileToSsh(input: {
     });
     source.on("error", fail);
     ssh.on("error", fail);
+    // Without a listener, an EPIPE (the remote script exited first) crashes the server; ssh's close handler reports it.
+    ssh.stdin?.on("error", () => {});
     if (input.progress) {
       input.progress.counter.on("error", fail);
       source.pipe(input.progress.counter).pipe(ssh.stdin ?? null);
@@ -1193,7 +1271,7 @@ export async function runSshCommand(
   config: SshConnectionConfig,
   remoteCommand: string,
   options: {
-    env?: Record<string, string>;
+    env?: Record<string, string | undefined>;
     stdin?: string;
     timeoutMs?: number;
     maxBuffer?: number;
@@ -1201,49 +1279,27 @@ export async function runSshCommand(
 ): Promise<SshCommandResult> {
   let cleanup: () => Promise<void> = () => Promise.resolve();
   try {
+    const envStdin = encodeSshEnvStdin(options.env);
     const auth = await createSshAuthArgs(config);
     cleanup = auth.cleanup;
-    const sshArgs = [...auth.args];
-    const envEntries = Object.entries(options.env ?? {})
-      .filter((entry): entry is [string, string] => typeof entry[1] === "string");
-    for (const [key] of envEntries) {
-      if (!isValidShellEnvKey(key)) {
-        throw new Error(`Invalid SSH environment variable key: ${key}`);
-      }
-    }
 
-    // Mirror buildSshSpawnTarget: source the login profiles first, then run
-    // `env KEY=VAL cmd` so user-supplied identity overrides win over anything a
-    // profile re-exports. The SSH target is an operator-configured host, not a
-    // Paperclip sandbox image, so it can expose `node` or an agent CLI only
-    // through a login profile; a non-login SSH command would miss that PATH.
-    // Source `/etc/profile` first so a host that exposes the PATH through
-    // `/etc/profile.d` scripts still resolves node and the agent CLI.
-    // The script no longer sources `nvm.sh`; a profile that adds nvm still runs.
-    // .bash_profile typically sources .bashrc itself; only source .bashrc
-    // directly when no .bash_profile exists, so a host that adds nvm in
-    // .bashrc still resolves node without a double-run of the setup.
-    const envArgs = envEntries.map(([key, value]) => `${key}=${shellQuote(value)}`);
+    // Login profiles, then the env block from stdin, then the command (see LOGIN_PROFILE_SCRIPT).
     const remoteScript = [
-      'if [ -f /etc/profile ]; then . /etc/profile >/dev/null 2>&1 || true; fi',
-      'if [ -f "$HOME/.profile" ]; then . "$HOME/.profile" >/dev/null 2>&1 || true; fi',
-      'if [ -f "$HOME/.bash_profile" ]; then . "$HOME/.bash_profile" >/dev/null 2>&1 || true; elif [ -f "$HOME/.bashrc" ]; then . "$HOME/.bashrc" >/dev/null 2>&1 || true; fi',
-      'if [ -f "$HOME/.zprofile" ]; then . "$HOME/.zprofile" >/dev/null 2>&1 || true; fi',
-      envArgs.length > 0
-        ? `exec env ${envArgs.join(" ")} sh -c ${shellQuote(remoteCommand)}`
-        : `exec sh -c ${shellQuote(remoteCommand)}`,
+      ...LOGIN_PROFILE_SCRIPT,
+      ...(envStdin ? [READ_ENV_FROM_STDIN] : []),
+      `exec sh -c ${shellQuote(remoteCommand)}`,
     ].join(" && ");
-
-    sshArgs.push(
+    const sshArgs = [
+      ...auth.args,
       "-p",
       String(config.port),
       `${config.username}@${config.host}`,
       `sh -c ${shellQuote(remoteScript)}`,
-    );
-
-    return options.stdin != null
+    ];
+    const stdin = envStdin || options.stdin != null ? `${envStdin}${options.stdin ?? ""}` : null;
+    return stdin != null
       ? await spawnText("ssh", sshArgs, {
-          stdin: options.stdin,
+          stdin,
           timeout: options.timeoutMs ?? 15_000,
           maxBuffer: options.maxBuffer ?? 1024 * 128,
         })
@@ -1264,51 +1320,30 @@ export async function buildSshSpawnTarget(input: {
 }): Promise<{
   command: string;
   args: string[];
+  stdinPrefix: string;
   cleanup: () => Promise<void>;
 }> {
-  for (const key of Object.keys(input.env)) {
-    if (!isValidShellEnvKey(key)) {
-      throw new Error(`Invalid SSH environment variable key: ${key}`);
-    }
-  }
+  const stdinPrefix = encodeSshEnvStdin(input.env);
   const auth = await createSshAuthArgs(input.spec);
-  const sshArgs = [...auth.args];
-  const envArgs = Object.entries(input.env)
-    .filter((entry): entry is [string, string] => typeof entry[1] === "string")
-    .map(([key, value]) => `${key}=${shellQuote(value)}`);
   const remoteCommandParts = [shellQuote(input.command), ...input.args.map((arg) => shellQuote(arg))].join(" ");
-  // Source the login profiles first, then run `env KEY=VAL cmd` so
-  // user-supplied identity overrides win over anything a profile re-exports.
-  // The SSH target is an operator-configured host, not a Paperclip sandbox
-  // image, so it can expose `node` or an agent CLI only through a login
-  // profile; a non-login SSH command would miss that PATH. Source
-  // `/etc/profile` first so a host that exposes the PATH through
-  // `/etc/profile.d` scripts still resolves node and the agent CLI. The script
-  // no longer sources `nvm.sh`; a profile that adds nvm still runs.
-  // .bash_profile typically sources .bashrc itself; only source .bashrc
-  // directly when no .bash_profile exists, so a host that adds nvm in
-  // .bashrc still resolves node without a double-run of the setup.
+  // Login profiles, then the env block from stdin, then the command (see LOGIN_PROFILE_SCRIPT).
   const remoteScript = [
-    'if [ -f /etc/profile ]; then . /etc/profile >/dev/null 2>&1 || true; fi',
-    'if [ -f "$HOME/.profile" ]; then . "$HOME/.profile" >/dev/null 2>&1 || true; fi',
-    'if [ -f "$HOME/.bash_profile" ]; then . "$HOME/.bash_profile" >/dev/null 2>&1 || true; elif [ -f "$HOME/.bashrc" ]; then . "$HOME/.bashrc" >/dev/null 2>&1 || true; fi',
-    'if [ -f "$HOME/.zprofile" ]; then . "$HOME/.zprofile" >/dev/null 2>&1 || true; fi',
+    ...LOGIN_PROFILE_SCRIPT,
+    ...(stdinPrefix ? [READ_ENV_FROM_STDIN] : []),
     `cd ${shellQuote(input.spec.remoteCwd)}`,
-    envArgs.length > 0
-      ? `exec env ${envArgs.join(" ")} ${remoteCommandParts}`
-      : `exec ${remoteCommandParts}`,
+    `exec ${remoteCommandParts}`,
   ].join(" && ");
-
-  sshArgs.push(
-    "-p",
-    String(input.spec.port),
-    `${input.spec.username}@${input.spec.host}`,
-    `sh -c ${shellQuote(remoteScript)}`,
-  );
 
   return {
     command: "ssh",
-    args: sshArgs,
+    args: [
+      ...auth.args,
+      "-p",
+      String(input.spec.port),
+      `${input.spec.username}@${input.spec.host}`,
+      `sh -c ${shellQuote(remoteScript)}`,
+    ],
+    stdinPrefix,
     cleanup: auth.cleanup,
   };
 }
@@ -1376,13 +1411,15 @@ export async function syncDirectoryToSsh(input: {
     let sshExited = false;
     let tarExitCode: number | null = null;
     let sshExitCode: number | null = null;
+    // True once we stop tar ourselves; its exit code then says nothing.
+    let tarStopped = false;
 
     const maybeFinish = () => {
       if (settled || !tarExited || !sshExited) {
         return;
       }
       settled = true;
-      if ((tarExitCode ?? 0) !== 0) {
+      if (!tarStopped && (tarExitCode ?? 0) !== 0) {
         reject(new Error(tarStderr.trim() || `tar exited with code ${tarExitCode ?? -1}`));
         return;
       }
@@ -1403,6 +1440,11 @@ export async function syncDirectoryToSsh(input: {
       reject(error);
     };
 
+    // ssh can exit before it reads the whole archive (a failed mkdir, login or
+    // host-key check). Its stdin then fails with EPIPE, or Node closes it and
+    // unpipes tar. Ignore that error: the close handler below stops tar, which
+    // would block forever, and reports ssh's error.
+    ssh.stdin?.on("error", () => {});
     if (progress) {
       progress.counter.on("error", fail);
       tar.stdout?.pipe(progress.counter).pipe(ssh.stdin ?? null);
@@ -1426,6 +1468,7 @@ export async function syncDirectoryToSsh(input: {
     ssh.on("close", (code) => {
       sshExited = true;
       sshExitCode = code;
+      if (code !== 0) tarStopped = tar.kill("SIGTERM");
       maybeFinish();
     });
     }).finally(auth.cleanup);
@@ -1491,11 +1534,13 @@ export async function syncDirectoryFromSsh(input: {
       let tarExited = false;
       let sshExitCode: number | null = null;
       let tarExitCode: number | null = null;
+      // True once we stop ssh ourselves; its exit code (255) then says nothing.
+      let sshStopped = false;
 
       const maybeFinish = () => {
         if (settled || !sshExited || !tarExited) return;
         settled = true;
-        if ((sshExitCode ?? 0) !== 0) {
+        if (!sshStopped && (sshExitCode ?? 0) !== 0) {
           reject(new Error(sshStderr.trim() || `ssh exited with code ${sshExitCode ?? -1}`));
           return;
         }
@@ -1514,6 +1559,11 @@ export async function syncDirectoryFromSsh(input: {
         reject(error);
       };
 
+      // tar can exit before it reads the whole archive (a full disk). Its stdin
+      // then fails with EPIPE, or Node closes it and unpipes ssh. Ignore that
+      // error: the close handler below stops ssh, which would block forever,
+      // and reports tar's error.
+      tar.stdin?.on("error", () => {});
       if (progress) {
         progress.counter.on("error", fail);
         ssh.stdout?.pipe(progress.counter).pipe(tar.stdin ?? null);
@@ -1537,6 +1587,7 @@ export async function syncDirectoryFromSsh(input: {
       tar.on("close", (code) => {
         tarExited = true;
         tarExitCode = code;
+        if (code !== 0) sshStopped = ssh.kill("SIGTERM");
         maybeFinish();
       });
     });

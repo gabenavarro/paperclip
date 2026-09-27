@@ -8,10 +8,28 @@ import {
   prepareGitHubOperationLaunchers,
   adapterExecutionTargetUsesManagedHome,
   ensureAdapterExecutionTargetRuntimeCommandInstalled,
+  readAdapterExecutionTargetHomeDir,
   resolveAdapterExecutionTargetCwd,
   runAdapterExecutionTargetProcess,
   runAdapterExecutionTargetShellCommand,
+  throwIfShellCommandTimedOut,
 } from "./execution-target.js";
+
+const SSH_TARGET = {
+  kind: "remote" as const,
+  transport: "ssh" as const,
+  remoteCwd: "/srv/paperclip/workspace",
+  spec: {
+    host: "ssh.example.test",
+    port: 22,
+    username: "ssh-user",
+    remoteCwd: "/srv/paperclip/workspace",
+    remoteWorkspacePath: "/srv/paperclip/workspace",
+    privateKey: null,
+    knownHosts: null,
+    strictHostKeyChecking: true,
+  },
+};
 
 describe("runAdapterExecutionTargetShellCommand", () => {
   afterEach(() => {
@@ -201,6 +219,45 @@ describe("runAdapterExecutionTargetShellCommand", () => {
     expect(onLog).toHaveBeenCalledWith("stderr", "partial stderr");
   });
 
+  it("treats an execFile timeout (killed, no code) as timedOut", async () => {
+    vi.spyOn(ssh, "runSshCommand").mockRejectedValue(
+      Object.assign(new Error("Command failed"), { code: null, killed: true, signal: "SIGTERM", stdout: "", stderr: "" }),
+    );
+
+    const result = await runAdapterExecutionTargetShellCommand("run-t1", SSH_TARGET, "sleep 99", {
+      cwd: "/tmp/local",
+      env: {},
+    });
+
+    expect(result).toMatchObject({ exitCode: null, signal: "SIGTERM", timedOut: true });
+  });
+
+  it("does not report a maxBuffer overflow as a timeout", async () => {
+    vi.spyOn(ssh, "runSshCommand").mockRejectedValue(
+      Object.assign(new Error("stdout maxBuffer length exceeded"), {
+        code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
+        killed: true,
+        signal: "SIGTERM",
+      }),
+    );
+
+    await expect(
+      runAdapterExecutionTargetShellCommand("run-t2", SSH_TARGET, "yes", { cwd: "/tmp/local", env: {} }),
+    ).rejects.toThrow("maxBuffer");
+  });
+
+  it("uses the default helper timeout when timeoutSec is 0", async () => {
+    const spy = vi.spyOn(ssh, "runSshCommand").mockResolvedValue({ stdout: "", stderr: "" });
+
+    await runAdapterExecutionTargetShellCommand("run-t3", SSH_TARGET, "true", {
+      cwd: "/tmp/local",
+      env: {},
+      timeoutSec: 0,
+    });
+
+    expect(spy).toHaveBeenCalledWith(expect.anything(), "true", expect.objectContaining({ timeoutMs: 15_000 }));
+  });
+
   it("keeps managed homes disabled for both local and SSH targets", () => {
     expect(adapterExecutionTargetUsesManagedHome(null)).toBe(false);
     expect(adapterExecutionTargetUsesManagedHome({
@@ -218,6 +275,22 @@ describe("runAdapterExecutionTargetShellCommand", () => {
         strictHostKeyChecking: true,
       },
     })).toBe(false);
+  });
+});
+
+describe("readAdapterExecutionTargetHomeDir", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("throws when the remote home-directory probe times out, instead of resolving null", async () => {
+    vi.spyOn(ssh, "runSshCommand").mockRejectedValue(
+      Object.assign(new Error("Command failed"), { code: null, killed: true, signal: "SIGTERM", stdout: "", stderr: "" }),
+    );
+
+    await expect(
+      readAdapterExecutionTargetHomeDir("run-home", SSH_TARGET, { cwd: "/tmp/local", env: {} }),
+    ).rejects.toThrow("Reading the remote home directory timed out");
   });
 });
 
@@ -435,5 +508,19 @@ describe("GitHub launcher lifecycle", () => {
       cwd: "/remote/workspace", timeoutMs: 5_000 });
     await expect(cleanupGitHubOperationLaunchers({ runId: "../other", target })).rejects.toThrow("Invalid GitHub launcher run ID");
     expect(runner.execute).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("throwIfShellCommandTimedOut", () => {
+  const base = { exitCode: 0, signal: null, timedOut: false, stdout: "", stderr: "", pid: null, startedAt: new Date().toISOString() };
+
+  it("throws with the label and stderr tail when the command timed out", () => {
+    expect(() => throwIfShellCommandTimedOut({ ...base, exitCode: null, timedOut: true, stderr: "cp: slow disk\n" }, "Copying skills"))
+      .toThrow("Copying skills timed out: cp: slow disk");
+  });
+
+  it("returns the result unchanged when it did not time out, even on a non-zero exit", () => {
+    const failed = { ...base, exitCode: 1, stderr: "no such file" };
+    expect(throwIfShellCommandTimedOut(failed, "Copying skills")).toBe(failed);
   });
 });

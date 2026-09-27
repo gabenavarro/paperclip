@@ -24,6 +24,7 @@ import {
   resolveAdapterExecutionTargetCommandForLogs,
   runAdapterExecutionTargetProcess,
   runAdapterExecutionTargetShellCommand,
+  throwIfShellCommandTimedOut,
   startAdapterExecutionTargetPaperclipBridge,
 } from "@paperclipai/adapter-utils/execution-target";
 import {
@@ -413,11 +414,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         }));
       if (remoteHomeDir && preparedExecutionTargetRuntime.assetDirs.skills) {
         remoteSkillsDir = path.posix.join(remoteHomeDir, ".gemini", "skills");
-        await runAdapterExecutionTargetShellCommand(
-          runId,
-          executionTarget,
-          `mkdir -p ${JSON.stringify(path.posix.dirname(remoteSkillsDir))} && rm -rf ${JSON.stringify(remoteSkillsDir)} && cp -a ${JSON.stringify(preparedExecutionTargetRuntime.assetDirs.skills)} ${JSON.stringify(remoteSkillsDir)}`,
-          { cwd, env, timeoutSec, graceSec, onLog },
+        throwIfShellCommandTimedOut(
+          await runAdapterExecutionTargetShellCommand(
+            runId,
+            executionTarget,
+            `mkdir -p ${JSON.stringify(path.posix.dirname(remoteSkillsDir))} && rm -rf ${JSON.stringify(remoteSkillsDir)} && cp -a ${JSON.stringify(preparedExecutionTargetRuntime.assetDirs.skills)} ${JSON.stringify(remoteSkillsDir)}`,
+            { cwd, env, timeoutSec, graceSec, onLog },
+          ),
+          "Copying Gemini skills to the remote host",
         );
       }
       // Gemini CLI refuses headless runs without an auth selection persisted in
@@ -445,11 +449,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           selectedAuthType: "gemini-api-key",
           security: { auth: { selectedType: "gemini-api-key" } },
         });
-        await runAdapterExecutionTargetShellCommand(
-          runId,
-          executionTarget,
-          `mkdir -p ${JSON.stringify(path.posix.dirname(remoteSettingsPath))} && { [ -f ${JSON.stringify(remoteSettingsPath)} ] || printf '%s' ${JSON.stringify(authSettingsJson)} > ${JSON.stringify(remoteSettingsPath)}; }`,
-          { cwd, env, timeoutSec, graceSec, onLog },
+        throwIfShellCommandTimedOut(
+          await runAdapterExecutionTargetShellCommand(
+            runId,
+            executionTarget,
+            `mkdir -p ${JSON.stringify(path.posix.dirname(remoteSettingsPath))} && { [ -f ${JSON.stringify(remoteSettingsPath)} ] || printf '%s' ${JSON.stringify(authSettingsJson)} > ${JSON.stringify(remoteSettingsPath)}; }`,
+            { cwd, env, timeoutSec, graceSec, onLog },
+          ),
+          "Writing Gemini settings on the remote host",
         );
       }
     } catch (error) {

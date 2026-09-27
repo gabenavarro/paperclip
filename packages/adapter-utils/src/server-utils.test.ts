@@ -586,6 +586,21 @@ describe("runChildProcess", () => {
     expect(result.stdout).toBe("done");
   });
 
+  it("does not crash when the child exits before reading a large stdin payload", async () => {
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-epipe-"));
+
+    const result = await runChildProcess(randomUUID(), "sh", ["-c", "exit 0"], {
+      cwd,
+      env: {},
+      timeoutSec: 10,
+      graceSec: 1,
+      onLog: async () => {},
+      stdin: "x".repeat(4 * 1024 * 1024),
+    });
+
+    expect(result.exitCode).toBe(0);
+  });
+
   it("waits for onSpawn before sending stdin to the child", async () => {
     const spawnDelayMs = 150;
     const startedAt = Date.now();

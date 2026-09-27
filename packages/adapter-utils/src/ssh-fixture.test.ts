@@ -1,12 +1,15 @@
 import { execFile, spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import {
+  buildKnownHostsEntry,
   buildSshSpawnTarget,
   buildSshEnvLabFixtureConfig,
+  createSshCommandManagedRuntimeRunner,
   getSshEnvLabSupport,
   prepareWorkspaceForSshExecution,
   readSshEnvLabFixtureStatus,
@@ -19,8 +22,20 @@ import {
   type SshEnvLabFixtureState,
 } from "./ssh.js";
 import { prepareRemoteManagedRuntime } from "./remote-managed-runtime.js";
+import { runChildProcess } from "./server-utils.js";
 
 const SSH_FIXTURE_TEST_TIMEOUT_MS = 30_000;
+// A spec for tests that only build ssh arguments; nothing connects to it.
+const FAKE_SPEC = {
+  host: "ssh.example.test",
+  port: 22,
+  username: "ssh-user",
+  remoteCwd: "/srv/paperclip/workspace",
+  remoteWorkspacePath: "/srv/paperclip/workspace",
+  privateKey: null,
+  knownHosts: null,
+  strictHostKeyChecking: true,
+};
 let sshEnvLabUnsupportedReason: string | null = null;
 
 // One entry per fixture root directory, registered at creation time so
@@ -192,6 +207,30 @@ describe("ssh env-lab fixture", () => {
 
     const stopped = await readSshEnvLabFixtureStatus(statePath);
     expect(stopped.running).toBe(false);
+  }, SSH_FIXTURE_TEST_TIMEOUT_MS);
+
+  it("reuses one SSH connection across commands", async () => {
+    const rootDir = await createFixtureRootDir();
+    const statePath = path.join(rootDir, "state.json");
+
+    const started = await startSshEnvLabFixtureOrSkip(statePath, "SSH connection reuse test");
+    if (!started) return;
+    const config = await buildSshEnvLabFixtureConfig(started);
+    // Count only the logins our commands cause; the fixture's own readiness
+    // check may log in before this point.
+    const countLogins = async () =>
+      (await readFile(started.sshdLogPath, "utf8")).match(/Accepted publickey/g)?.length ?? 0;
+    const loginsBefore = await countLogins();
+
+    const firstStartedAt = Date.now();
+    await runSshCommand(config, "true", { timeoutMs: 30_000 });
+    // A backgrounded master that kept our stdio pipes open would stall this
+    // call until ControlPersist ends (120 s).
+    expect(Date.now() - firstStartedAt).toBeLessThan(10_000);
+    await runSshCommand(config, "true", { timeoutMs: 30_000 });
+    await runSshCommand(config, "true", { timeoutMs: 30_000 });
+
+    expect((await countLogins()) - loginsBefore).toBeLessThanOrEqual(1);
   }, SSH_FIXTURE_TEST_TIMEOUT_MS);
 
   it("resolves a relative statePath to the same absolute state across start, status, and stop", async () => {
@@ -447,6 +486,149 @@ describe("ssh env-lab fixture", () => {
     await expect(stat(rootDir)).rejects.toThrow();
   }, SSH_FIXTURE_TEST_TIMEOUT_MS);
 
+  it("keeps env values out of the ssh argv and sends them on stdin", async () => {
+    const target = await buildSshSpawnTarget({
+      spec: FAKE_SPEC,
+      command: "node",
+      args: ["--version"],
+      env: { PAPERCLIP_API_KEY: "s3cr3t-token-value" },
+    });
+
+    expect(target.args.join(" ")).not.toContain("s3cr3t-token-value");
+    expect(target.stdinPrefix).toBe(
+      `PAPERCLIP_API_KEY ${Buffer.from("s3cr3t-token-value", "utf8").toString("base64")}\n\n`,
+    );
+    const remoteScript = String(target.args.at(-1) ?? "");
+    // base64 is resolved once, so a later PATH export cannot break a decode,
+    // and `set +x` keeps a profile's xtrace from printing the values.
+    expect(remoteScript).toContain('"$__pc_b" -d');
+    expect(remoteScript).not.toContain("exec env ");
+    expect(remoteScript).toContain("set +x");
+    expect(remoteScript).toContain("command -v base64");
+    await target.cleanup();
+  });
+
+  it("fails closed when the env block's stdin ends before the empty terminator line", async () => {
+    const rootDir = await createFixtureRootDir();
+    const statePath = path.join(rootDir, "state.json");
+    const started = await startSshEnvLabFixtureOrSkip(statePath, "SSH env fail-closed test");
+    if (!started) return;
+    const config = await buildSshEnvLabFixtureConfig(started);
+
+    const target = await buildSshSpawnTarget({
+      spec: { ...config, remoteCwd: started.workspaceDir },
+      command: "sh",
+      args: ["-c", "echo ran"],
+      env: { A: "1" },
+    });
+
+    try {
+      // Drop the trailing "\n" so the stream ends right after the one KEY
+      // line, never sending the empty terminator line the read loop waits for.
+      const truncatedStdin = target.stdinPrefix.slice(0, -1);
+      const { exitCode, stdout } = await new Promise<{ exitCode: number | null; stdout: string }>(
+        (resolve, reject) => {
+          const child = spawn("ssh", target.args, { stdio: ["pipe", "pipe", "pipe"] });
+          let stdout = "";
+          child.stdout.on("data", (chunk) => {
+            stdout += String(chunk);
+          });
+          child.on("error", reject);
+          child.stdin.on("error", () => {});
+          child.stdin.end(truncatedStdin);
+          child.on("close", (code) => resolve({ exitCode: code, stdout }));
+        },
+      );
+
+      expect(stdout).not.toContain("ran");
+      expect(exitCode).toBe(97);
+    } finally {
+      await target.cleanup();
+    }
+  }, SSH_FIXTURE_TEST_TIMEOUT_MS);
+
+  it("names the ControlMaster socket by a digest of the connection credentials", async () => {
+    const target = await buildSshSpawnTarget({
+      spec: FAKE_SPEC,
+      command: "node",
+      args: ["--version"],
+      env: {},
+    });
+
+    try {
+      const controlPathArg = target.args.find((arg) => arg.startsWith("ControlPath="));
+      expect(controlPathArg).toBeDefined();
+      const socketName = path.basename(controlPathArg!.slice("ControlPath=".length));
+      expect(socketName).toMatch(/^[0-9a-f]{16}$/);
+    } finally {
+      await target.cleanup();
+    }
+  });
+
+  it("keys the ControlMaster socket by more than host/port/user, so a mismatched known_hosts cannot ride another config's master", async () => {
+    const rootDir = await createFixtureRootDir();
+    const statePath = path.join(rootDir, "state.json");
+    const started = await startSshEnvLabFixtureOrSkip(statePath, "SSH ControlMaster credential-keying test");
+    if (!started) return;
+    const config = await buildSshEnvLabFixtureConfig(started);
+
+    // Starts (and leaves running) a ControlMaster for this host/port/user.
+    await runSshCommand(config, "true", { timeoutMs: 30_000 });
+
+    // Same host/port/user, but pinned to the wrong host key (the fixture's
+    // CLIENT key, never the host's), so strict host key checking must reject
+    // it — unless this second config wrongly rides the first master.
+    const clientPublicKey = await readFile(started.clientPublicKeyPath, "utf8");
+    const mismatchedConfig = {
+      ...config,
+      knownHosts: buildKnownHostsEntry({ host: config.host, port: config.port, publicKey: clientPublicKey }),
+    };
+
+    await expect(runSshCommand(mismatchedConfig, "true", { timeoutMs: 30_000 })).rejects.toThrow();
+  }, SSH_FIXTURE_TEST_TIMEOUT_MS);
+
+  it("recovers when the ssh control-socket directory is removed out from under it", async () => {
+    const rootDir = await createFixtureRootDir();
+    const statePath = path.join(rootDir, "state.json");
+    const started = await startSshEnvLabFixtureOrSkip(statePath, "SSH control-dir recovery test");
+    if (!started) return;
+    const config = await buildSshEnvLabFixtureConfig(started);
+
+    await runSshCommand(config, "true", { timeoutMs: 30_000 });
+
+    const target = await buildSshSpawnTarget({
+      spec: { ...config, remoteCwd: started.workspaceDir },
+      command: "true",
+      args: [],
+      env: {},
+    });
+    const controlPathArg = target.args.find((arg) => arg.startsWith("ControlPath="));
+    expect(controlPathArg).toBeDefined();
+    const controlDir = path.dirname(controlPathArg!.slice("ControlPath=".length));
+    await target.cleanup();
+
+    await rm(controlDir, { recursive: true, force: true });
+
+    await expect(runSshCommand(config, "true", { timeoutMs: 30_000 })).resolves.toBeDefined();
+  }, SSH_FIXTURE_TEST_TIMEOUT_MS);
+
+  it("stops using a control-socket directory that other users can enter", async () => {
+    const controlDirOf = async () => {
+      const target = await buildSshSpawnTarget({ spec: FAKE_SPEC, command: "true", args: [], env: {} });
+      await target.cleanup();
+      const controlPathArg = target.args.find((arg) => arg.startsWith("ControlPath="));
+      return path.dirname(controlPathArg!.slice("ControlPath=".length));
+    };
+
+    const first = await controlDirOf();
+    await chmod(first, 0o777);
+    const second = await controlDirOf();
+    await rm(first, { recursive: true, force: true });
+
+    expect(second).not.toBe(first);
+    expect((await stat(second)).mode & 0o077).toBe(0);
+  });
+
   it("builds a remote script that sources login profiles but no nvm", async () => {
     const target = await buildSshSpawnTarget({
       spec: {
@@ -484,7 +666,9 @@ describe("ssh env-lab fixture", () => {
     // quotes are escaped. Assert the command still runs: cd, env, and the argv.
     expect(remoteScript).toContain("cd ");
     expect(remoteScript).toContain("/srv/paperclip/workspace");
-    expect(remoteScript).toContain("exec env ");
+    expect(remoteScript).toContain('"$__pc_b" -d');
+    // Profiles cannot read stdin, so they cannot eat the env block or the prompt.
+    expect(remoteScript).toContain("</dev/null");
     expect(remoteScript).toContain("node");
     expect(remoteScript).toContain("--version");
     await target.cleanup();
@@ -1043,5 +1227,172 @@ describe("ssh env-lab fixture", () => {
     const recentSubjects = await git(localRepo, ["log", "--pretty=%s", "-3"]);
     expect(recentSubjects).toContain("remote update a");
     expect(recentSubjects).toContain("remote update b");
+  }, SSH_FIXTURE_TEST_TIMEOUT_MS);
+
+  it("delivers env values byte-exact without putting them in argv", async () => {
+    const rootDir = await createFixtureRootDir();
+    const statePath = path.join(rootDir, "state.json");
+    const started = await startSshEnvLabFixtureOrSkip(statePath, "SSH env over stdin test");
+    if (!started) return;
+    const config = await buildSshEnvLabFixtureConfig(started);
+    const tricky = "it's \"quoted\" $HOME `x` ü\nline2\n\n";
+
+    const result = await runSshCommand(config, 'printf %s "$TRICKY"; printf "|%s" "$EMPTY"', {
+      env: { TRICKY: tricky, EMPTY: "" },
+      timeoutMs: 30_000,
+    });
+
+    expect(result.stdout).toBe(`${tricky}|`);
+  }, SSH_FIXTURE_TEST_TIMEOUT_MS);
+
+  it("passes the command's own stdin after the env block", async () => {
+    const rootDir = await createFixtureRootDir();
+    const statePath = path.join(rootDir, "state.json");
+    const started = await startSshEnvLabFixtureOrSkip(statePath, "SSH env plus stdin test");
+    if (!started) return;
+    const config = await buildSshEnvLabFixtureConfig(started);
+
+    const result = await runSshCommand(config, 'printf "%s|" "$A"; cat', {
+      env: { A: "one" },
+      stdin: "payload\nmore\n",
+      timeoutMs: 30_000,
+    });
+
+    expect(result.stdout).toBe("one|payload\nmore\n");
+  }, SSH_FIXTURE_TEST_TIMEOUT_MS);
+
+  it("does not crash when the remote command exits before reading a large stdin payload", async () => {
+    const rootDir = await createFixtureRootDir();
+    const statePath = path.join(rootDir, "state.json");
+    const started = await startSshEnvLabFixtureOrSkip(statePath, "SSH stdin EPIPE test");
+    if (!started) return;
+    const config = await buildSshEnvLabFixtureConfig(started);
+
+    const result = await runSshCommand(config, "exit 0", {
+      stdin: "x".repeat(4 * 1024 * 1024),
+      timeoutMs: 30_000,
+    });
+
+    expect(result).toBeDefined();
+  }, SSH_FIXTURE_TEST_TIMEOUT_MS);
+
+  it("rejects with the remote error when a workspace upload fails before the remote side reads it", async () => {
+    const rootDir = await createFixtureRootDir();
+    const statePath = path.join(rootDir, "state.json");
+    const localDir = path.join(rootDir, "local");
+    await mkdir(localDir, { recursive: true });
+    await writeFile(path.join(localDir, "big.bin"), Buffer.alloc(8 * 1024 * 1024));
+    const started = await startSshEnvLabFixtureOrSkip(statePath, "SSH upload EPIPE test");
+    if (!started) return;
+    const config = await buildSshEnvLabFixtureConfig(started);
+    // A file where the remote directory should be: `mkdir -p` fails, and the
+    // remote shell exits without reading the archive.
+    const blocker = path.join(started.workspaceDir, "not-a-dir");
+    await writeFile(blocker, "");
+
+    await expect(
+      syncDirectoryToSsh({
+        spec: { ...config, remoteCwd: started.workspaceDir },
+        localDir,
+        remoteDir: path.posix.join(blocker, "sub"),
+      }),
+    ).rejects.toThrow(/not-a-dir/);
+  }, SSH_FIXTURE_TEST_TIMEOUT_MS);
+
+  it("rejects with the local tar error when a workspace restore fails before tar reads it", async () => {
+    const rootDir = await createFixtureRootDir();
+    const statePath = path.join(rootDir, "state.json");
+    const localDir = path.join(rootDir, "local");
+    const fakeBin = path.join(rootDir, "bin");
+    await mkdir(localDir, { recursive: true });
+    await mkdir(fakeBin, { recursive: true });
+    // A local tar that fails without reading its stdin, like one on a full disk.
+    await writeFile(path.join(fakeBin, "tar"), "#!/bin/sh\necho 'tar: disk full' >&2\nexit 2\n", { mode: 0o755 });
+    const started = await startSshEnvLabFixtureOrSkip(statePath, "SSH restore EPIPE test");
+    if (!started) return;
+    const config = await buildSshEnvLabFixtureConfig(started);
+    const remoteDir = path.posix.join(started.workspaceDir, "restore-epipe");
+    await mkdir(remoteDir, { recursive: true });
+    await writeFile(path.join(remoteDir, "big.bin"), Buffer.alloc(8 * 1024 * 1024));
+
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${fakeBin}:${savedPath}`;
+    try {
+      await expect(
+        syncDirectoryFromSsh({ spec: { ...config, remoteCwd: started.workspaceDir }, remoteDir, localDir }),
+      ).rejects.toThrow(/disk full/);
+    } finally {
+      process.env.PATH = savedPath;
+    }
+  }, SSH_FIXTURE_TEST_TIMEOUT_MS);
+
+  it("runs a remote child process with env on stdin before the prompt", async () => {
+    const rootDir = await createFixtureRootDir();
+    const statePath = path.join(rootDir, "state.json");
+    const started = await startSshEnvLabFixtureOrSkip(statePath, "SSH child process env test");
+    if (!started) return;
+    const config = await buildSshEnvLabFixtureConfig(started);
+    const localDir = path.join(rootDir, "local");
+    await mkdir(localDir, { recursive: true });
+
+    const result = await runChildProcess(randomUUID(), "sh", ["-c", 'printf "%s|" "$A"; cat'], {
+      cwd: localDir,
+      env: { A: "one" },
+      timeoutSec: 30,
+      graceSec: 5,
+      onLog: async () => {},
+      stdin: "prompt text",
+      remoteExecution: { ...config, remoteCwd: started.workspaceDir },
+    });
+
+    expect(result.stdout).toBe("one|prompt text");
+  }, SSH_FIXTURE_TEST_TIMEOUT_MS);
+
+  it("runs runner shell commands with env from stdin", async () => {
+    const rootDir = await createFixtureRootDir();
+    const statePath = path.join(rootDir, "state.json");
+    const started = await startSshEnvLabFixtureOrSkip(statePath, "SSH runner env test");
+    if (!started) return;
+    const config = await buildSshEnvLabFixtureConfig(started);
+    const runner = createSshCommandManagedRuntimeRunner({
+      spec: { ...config, remoteCwd: started.workspaceDir },
+    });
+
+    const result = await runner.execute({ command: "sh", args: ["-c", 'printf %s "$K"'], env: { K: "v a l" } });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("v a l");
+  }, SSH_FIXTURE_TEST_TIMEOUT_MS);
+
+  it("removes the per-run remote copy after a successful restore", async () => {
+    const rootDir = await createFixtureRootDir();
+    const statePath = path.join(rootDir, "state.json");
+    const localRepo = path.join(rootDir, "local-workspace");
+    await mkdir(localRepo, { recursive: true });
+    await git(localRepo, ["init"]);
+    await git(localRepo, ["checkout", "-b", "main"]);
+    await git(localRepo, ["config", "user.name", "Paperclip Test"]);
+    await git(localRepo, ["config", "user.email", "test@paperclip.dev"]);
+    await writeFile(path.join(localRepo, "tracked.txt"), "base\n", "utf8");
+    await git(localRepo, ["add", "tracked.txt"]);
+    await git(localRepo, ["commit", "-m", "initial"]);
+
+    const started = await startSshEnvLabFixtureOrSkip(statePath, "SSH run-directory cleanup test");
+    if (!started) return;
+    const config = await buildSshEnvLabFixtureConfig(started);
+    const prepared = await prepareRemoteManagedRuntime({
+      spec: { ...config, remoteCwd: started.workspaceDir },
+      runId: "run-cleanup",
+      adapterKey: "test-adapter",
+      workspaceLocalDir: localRepo,
+    });
+    const runDir = path.posix.dirname(prepared.workspaceRemoteDir);
+
+    await prepared.restoreWorkspace();
+
+    const probe = await runSshCommand(config, `test -e ${JSON.stringify(runDir)} && echo present || echo gone`, {
+      timeoutMs: 30_000,
+    });
+    expect(probe.stdout.trim()).toBe("gone");
   }, SSH_FIXTURE_TEST_TIMEOUT_MS);
 });
