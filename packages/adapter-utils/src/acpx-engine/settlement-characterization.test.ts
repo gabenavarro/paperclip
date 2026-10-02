@@ -39,6 +39,7 @@ import {
   createAcpxEngineExecutor,
   type AcpxEngineExecutorOptions,
 } from "./execute.js";
+import { AcpRuntimeError, createRuntimeStore } from "acpx/runtime";
 import { runChildProcess } from "../server-utils.js";
 import {
   mirrorDirectory,
@@ -740,6 +741,85 @@ describe("ACP settlement — Layer A: engine teardown orchestration", () => {
     expect(result.errorCode).toBe("acpx_turn_failed");
     expect(result.errorMessage).toContain("turn upstream boom");
     expect(result.errorMessage).not.toContain("close boom");
+  });
+
+  it("marks a discarded session record for reset even when the agent cannot close it", async () => {
+    // Issue #12: the turn fails with SESSION_RESUME_REQUIRED and close() throws
+    // like Gemini CLI's missing session/close, so acpx never saves its reset
+    // flag. endSession must mark the stored record for reset itself.
+    const root = await makeTempRoot();
+    const stateDir = path.join(root, "state");
+    // The real acpx store the engine uses for this stateDir.
+    const store = createRuntimeStore({ stateDir });
+    let capturedSessionKey: string | undefined;
+
+    const execute = createAcpxEngineExecutor({
+      createRuntime: () =>
+        ({
+          ensureSession: async (input: { sessionKey: string }) => {
+            // Seed a stored record for the engine's session key, as a prior run would have.
+            capturedSessionKey = input.sessionKey;
+            const now = new Date().toISOString();
+            await store.save({
+              schema: "acpx.session.v1",
+              acpxRecordId: input.sessionKey,
+              acpSessionId: "backend-session",
+              agentCommand: "node ./fake-acp.js",
+              cwd: root,
+              createdAt: now,
+              lastUsedAt: now,
+              lastSeq: 0,
+              eventLog: {
+                active_path: path.join(stateDir, "sessions", "unused.stream.ndjson"),
+                segment_count: 1,
+                max_segment_bytes: 1024,
+                max_segments: 1,
+              },
+              messages: [],
+              updated_at: now,
+              cumulative_token_usage: {},
+              request_token_usage: {},
+            } as never);
+            return okHandle;
+          },
+          startTurn: () => ({
+            events: (async function* () {})(),
+            result: Promise.resolve({
+              status: "failed",
+              error: {
+                message:
+                  "Persistent ACP session backend-session could not be resumed: Internal error (acpx_turn_failed)",
+                detailCode: "SESSION_RESUME_REQUIRED",
+              },
+            }),
+            cancel: async () => {},
+          }),
+          // acpx's close() rejects like this when the agent lacks session/close.
+          close: vi.fn(async () => {
+            throw new AcpRuntimeError(
+              "ACP_BACKEND_UNSUPPORTED_CONTROL",
+              "Agent does not support session/close for backend-session.",
+            );
+          }),
+        }) as never,
+    });
+
+    const result = await execute({
+      runId: "resume-required",
+      agent: { id: "agent-1", companyId: "company-1" },
+      runtime: {},
+      config: { agent: "custom", agentCommand: "node ./fake-acp.js", stateDir, mode: "persistent" },
+      context: {},
+      onLog: async () => {},
+      onMeta: async () => {},
+    } as never);
+
+    expect(result.exitCode).toBe(1);
+    expect(capturedSessionKey).toBeTruthy();
+
+    // No warm entry after a restart, so this is the direct runtime.close() path.
+    const record = await store.load(capturedSessionKey!);
+    expect(record?.acpx?.reset_on_next_ensure).toBe(true);
   });
 });
 

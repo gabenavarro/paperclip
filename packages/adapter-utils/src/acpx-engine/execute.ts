@@ -3622,6 +3622,24 @@ async function closeWarmHandle(input: {
   flushChildStderr(input.entry.childStderrState);
 }
 
+/**
+ * Mark a discarded session's persisted record for reset, independent of
+ * whether the agent could close its backend session. acpx's own `close()`
+ * sets `reset_on_next_ensure` only AFTER a successful backend session/close,
+ * so an agent that does not support `session/close` (e.g. Gemini CLI) makes
+ * that close throw first, and the flag is never saved — the next run then
+ * resumes the now-invalid session forever. Paperclip sets the same flag
+ * itself, through its own handle on the store, so a discard always sticks.
+ */
+async function markSessionRecordResetOnDiscard(
+  store: AcpSessionStore,
+  sessionKey: string,
+): Promise<void> {
+  const record = await store.load(sessionKey).catch(() => undefined);
+  if (!record || record.acpx?.reset_on_next_ensure === true) return;
+  await store.save({ ...record, acpx: { ...record.acpx, reset_on_next_ensure: true } }).catch(() => {});
+}
+
 function warmHandleMatches(
   entry: RuntimeCacheEntry | undefined,
   runtime: AcpRuntime,
@@ -4031,6 +4049,8 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
       let sessionHandle!: AcpRuntimeHandle;
       let childStderrState!: ChildStderrState;
       let processIdentitySink!: AcpxProcessIdentitySink;
+      // Assigned in startup; endSession also needs it (markSessionRecordResetOnDiscard).
+      let persistedRuntimeStore!: AcpSessionStore;
       let resumedSession = false;
       let clearSession = false;
       let referencedProjectStagingFailuresField:
@@ -4219,7 +4239,7 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
         processIdentitySink.current = ctx.onSpawn;
         flushChildStderr(childStderrState);
         childStderrState.logPath = prepared.childStderrLogPath;
-        const persistedRuntimeStore = createRuntimeStore({ stateDir: prepared.stateDir });
+        persistedRuntimeStore = createRuntimeStore({ stateDir: prepared.stateDir });
         const runtimeStore: AcpSessionStore = {
           async load(id) {
             const record = await persistedRuntimeStore.load(id);
@@ -5310,6 +5330,10 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
               reason: settlement.reason,
               discardPersistentState: settlement.discardPersistentState,
             });
+            // The warm-store close also swallows a failed session/close.
+            if (settlement.discardPersistentState) {
+              await markSessionRecordResetOnDiscard(persistedRuntimeStore, prepared.sessionKey);
+            }
             return;
           }
           const onCloseError = settlement.recordCloseError || ctx.signal?.aborted
@@ -5323,6 +5347,10 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
             })
             .then(() => { runtimeStopConfirmed = true; })
             .catch(onCloseError);
+          // Even when the close above failed (see markSessionRecordResetOnDiscard).
+          if (settlement.discardPersistentState) {
+            await markSessionRecordResetOnDiscard(persistedRuntimeStore, prepared.sessionKey);
+          }
           if (settlement.dropWarmEntry && warmHandleMatches(existing, runtime, settlement.handle) && existing) {
             clearWarmHandleTimer(existing);
             warmHandles.delete(prepared.sessionKey);
